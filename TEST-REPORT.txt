@@ -1,0 +1,13 @@
+DMO Toolbox Ultimate V19 - Static Validation
+=============================================
+PASS: V18 features retained
+PASS: app.js syntax
+PASS: GoogleAppsScript.gs syntax
+PASS: manifest.webmanifest valid JSON
+PASS: sw.js syntax
+PASS: PWA icons 192/512 included
+PASS: theme + mobile navigation hooks included
+PASS: offline public-data cache fallback included
+PASS: V19 database has no formula error matches
+
+Runtime checks still required after deployment: Google Drive authorization, scheduled trigger, PWA install prompt, and browser offline behavior.
