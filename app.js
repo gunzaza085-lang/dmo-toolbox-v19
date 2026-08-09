@@ -33,6 +33,12 @@ const state = {
   wikiSearch: '',
   inventorySearch: '',
   inventoryFilter: 'ALL',
+  inventorySort: 'NAME',
+  stockActionPending: '',
+  stockActionResult: null,
+  stockPendingRequests: {},
+  stockConfirmFingerprint: '',
+  stockAddDraft: { product: '', amount: '', reason: 'เติมของเข้า' },
   customerSearchAdmin: '',
   customerFilter: 'ALL',
   promoEdit: null,
@@ -268,9 +274,11 @@ function applyAdminRoleGuards(){
   const role=String(state.adminUser?.role||'VIEWER').toUpperCase();
   const disable=(selectors)=>document.querySelectorAll(selectors.join(',')).forEach((el)=>{el.disabled=true;el.setAttribute('aria-disabled','true');el.title='บัญชี '+role+' ไม่มีสิทธิ์แก้ไขส่วนนี้';});
   const adminOnly=['[data-new]','[data-edit]','[data-delete]','#saveRecordBtn','#bulkApplyBtn','#bulkTrashBtn','[data-restore-trash]','[data-delete-trash]','#saveSettingsBtn','#savePromotionBtn','[data-edit-promotion]','[data-delete-promotion]','#wikiGalleryBtn','#wikiCenterRecordBtn','[data-wiki-import]','[data-attach-wiki]'];
-  const staffWrite=['[data-save-order]','[data-pick-item]','[data-stock-adjust]','[data-stock-set]','[data-save-customer]','#saveCrmCustomerBtn','#addInteractionBtn'];
+  const staffWrite=['[data-save-order]','[data-pick-item]','[data-save-customer]','#saveCrmCustomerBtn','#addInteractionBtn'];
+  const stockAdminOnly=['[data-stock-adjust]','[data-stock-set]','#stockAddBtn','#syncStockBtn'];
   const ownerOnly=['#saveSecurityUserBtn','#toggleBackupTriggerBtn','[data-restore-backup]','[data-delete-backup]'];
   if(!['OWNER','ADMIN'].includes(role))disable(adminOnly);
+  if(!['OWNER','ADMIN'].includes(role))disable(stockAdminOnly);
   if(!['OWNER','ADMIN','STAFF'].includes(role))disable(staffWrite);
   if(role!=='OWNER')disable(ownerOnly);
 }
@@ -555,6 +563,7 @@ function calcText(parsed) {
 
 function inventoryPage() {
   const products = [...(state.adminData.seals || []), ...(state.adminData.gameItems || [])];
+  const role=String(state.adminData?.security?.actor?.role||state.adminUser?.role||'VIEWER').toUpperCase(),canEdit=['OWNER','ADMIN'].includes(role);
   const query = norm(state.inventorySearch);
   const filtered = products.filter((product) => {
     if (query && ![product.name, ...(product.aliases || [])].some((value) => norm(value).includes(query))) return false;
@@ -566,15 +575,21 @@ function inventoryPage() {
     return true;
   }).sort((a, b) => {
     const av = availableStock(a), bv = availableStock(b);
+    if(state.inventorySort==='STOCK_ASC')return (av===''?Number.MAX_SAFE_INTEGER:Number(av))-(bv===''?Number.MAX_SAFE_INTEGER:Number(bv))||String(a.name).localeCompare(String(b.name),'th');
+    if(state.inventorySort==='STOCK_DESC')return (bv===''?-1:Number(bv))-(av===''?-1:Number(av))||String(a.name).localeCompare(String(b.name),'th');
+    if(state.inventorySort==='UPDATED')return new Date(b.updatedAt||0)-new Date(a.updatedAt||0)||String(a.name).localeCompare(String(b.name),'th');
     const aRank = av === '' ? 2 : av <= 0 ? 0 : Number(a.lowStockAlert || 0) > 0 && av <= Number(a.lowStockAlert || 0) ? 1 : 3;
     const bRank = bv === '' ? 2 : bv <= 0 ? 0 : Number(b.lowStockAlert || 0) > 0 && bv <= Number(b.lowStockAlert || 0) ? 1 : 3;
-    return aRank - bRank || String(a.name).localeCompare(String(b.name), 'th');
+    return state.inventorySort==='NAME'?String(a.name).localeCompare(String(b.name),'th'):aRank-bRank||String(a.name).localeCompare(String(b.name),'th');
   });
   const logs = state.adminData.stockLogs || [];
+  const busy=!!state.stockActionPending,lastUpdated=state.adminData.stockUpdatedAt||'';
   return `<div class="inventory-layout">
     <section class="panel">
-      <div class="admin-toolbar"><div><h2 class="panel-title">จัดการสต๊อก (${products.length})</h2><p class="product-meta">เพิ่ม ลด กำหนดสต๊อก กันสินค้า และตั้งค่าแจ้งเตือนจากหน้าเดียว</p></div><button class="btn" id="reloadInventoryBtn">🔄 โหลดใหม่</button></div>
-      <div class="inventory-filters"><input id="inventorySearch" placeholder="ค้นหาชื่อสินค้า..." value="${html(state.inventorySearch)}"><div class="chip-row">${[['ALL','ทั้งหมด'],['STOCKED','มีสต๊อก'],['LOW','ใกล้หมด'],['OUT','หมด'],['CHECK','ต้องเช็ก']].map(([value,label])=>`<button class="filter-chip ${state.inventoryFilter===value?'active':''}" data-inventory-filter="${value}">${label}</button>`).join('')}</div></div>
+      <div class="admin-toolbar"><div><h2 class="panel-title">จัดการสต๊อก (${products.length})</h2><p class="product-meta">Google Sheet เป็นข้อมูลหลัก • อัปเดตล่าสุด: ${lastUpdated?html(new Date(lastUpdated).toLocaleString('th-TH')):'-'}</p></div><div class="chip-row"><button class="btn" id="syncStockBtn" ${busy?'disabled':''}>${state.stockActionPending==='SYNC'?'<span class="loading"></span> กำลังซิงก์...':'🔄 ซิงก์จาก Google Sheet'}</button><button class="btn" id="reloadInventoryBtn" ${busy?'disabled':''}>โหลดใหม่</button></div></div>
+      ${canEdit?`<div class="stock-add-form"><label>สินค้า<select id="stockAddProduct"><option value="">เลือกสินค้า</option>${products.map(p=>`<option value="${html(p.kind+'|'+p.id)}" ${state.stockAddDraft.product===p.kind+'|'+p.id?'selected':''}>${html(p.name)} (${p.stock===''?'-':money(p.stock)})</option>`).join('')}</select></label><label>จำนวนที่เพิ่ม<input id="stockAddAmount" type="number" min="1" step="1" placeholder="เช่น 500" value="${html(state.stockAddDraft.amount)}"></label><label>เหตุผล<input id="stockAddReason" value="${html(state.stockAddDraft.reason)}" maxlength="250"></label><button class="btn success" id="stockAddBtn" ${busy?'disabled':''}>${state.stockActionPending==='ADD_FORM'?'<span class="loading"></span> กำลังอัปเดต...':state.stockConfirmFingerprint?'ยืนยันเพิ่ม Stock':'เพิ่ม Stock'}</button></div>`:`<div class="security-note">บัญชี ${html(role)} ดู Stock ได้อย่างเดียว เฉพาะ OWNER/ADMIN เท่านั้นที่แก้ไขได้</div>`}
+      ${state.stockActionResult?`<div class="security-note stock-result"><b>${html(state.stockActionResult.message)}</b><br>${html(state.stockActionResult.detail||'')}</div>`:''}
+      <div class="inventory-filters"><input id="inventorySearch" placeholder="ค้นหาชื่อสินค้า..." value="${html(state.inventorySearch)}"><select id="inventorySort"><option value="NAME" ${state.inventorySort==='NAME'?'selected':''}>เรียงตามชื่อ</option><option value="STOCK_ASC" ${state.inventorySort==='STOCK_ASC'?'selected':''}>จำนวนน้อย → มาก</option><option value="STOCK_DESC" ${state.inventorySort==='STOCK_DESC'?'selected':''}>จำนวนมาก → น้อย</option><option value="UPDATED" ${state.inventorySort==='UPDATED'?'selected':''}>อัปเดตล่าสุด</option></select><div class="chip-row">${[['ALL','ทั้งหมด'],['STOCKED','มีสต๊อก'],['LOW','ใกล้หมด'],['OUT','หมด'],['CHECK','ต้องเช็ก']].map(([value,label])=>`<button class="filter-chip ${state.inventoryFilter===value?'active':''}" data-inventory-filter="${value}">${label}</button>`).join('')}</div></div>
       <div class="inventory-list">${filtered.length ? filtered.map(inventoryRow).join('') : '<div class="empty">ไม่พบสินค้า</div>'}</div>
     </section>
     <section class="panel"><h2 class="panel-title">ประวัติสต๊อกล่าสุด</h2><div class="stock-log-list">${logs.length ? logs.slice(0,120).map((log)=>`<div class="stock-log"><div><b>${html(log.productName || log.productId)}</b><div class="product-meta">${html(log.createdAt)} • ${html(log.action)} • ${html(log.reason || '-')}</div></div><div class="stock-change ${Number(log.changeQty)>=0?'plus':'minus'}">${Number(log.changeQty)>0?'+':''}${money(log.changeQty)}</div><div class="product-meta">${money(log.beforeStock)} → ${money(log.afterStock)}</div></div>`).join('') : '<div class="empty">ยังไม่มีประวัติสต๊อก</div>'}</div></section>
@@ -585,10 +600,11 @@ function inventoryRow(product) {
   const available = availableStock(product);
   const low = available !== '' && available > 0 && Number(product.lowStockAlert || 0) > 0 && available <= Number(product.lowStockAlert || 0);
   const stateClass = available === '' ? 'check' : available <= 0 ? 'out' : low ? 'low' : 'ok';
+  const busy=!!state.stockActionPending;
   return `<article class="inventory-row ${stateClass}">
     <div class="inventory-info"><b>${html(product.name)}</b><div class="product-meta">${product.kind === 'SEAL' ? `${html(product.category)} • ${sectionLabel(product.section)}` : html(product.itemCategory || 'ไอเทม')} • ${html(product.unit || '')}</div></div>
     <div class="inventory-kpis"><span>ทั้งหมด<b>${product.stock === '' ? '-' : money(product.stock)}</b></span><span>กันไว้<b>${money(product.reservedStock || 0)}</b></span><span>ขายได้<b>${available === '' ? '-' : money(available)}</b></span><span>เตือนที่<b>${money(product.lowStockAlert || 0)}</b></span></div>
-    <div class="inventory-actions"><button class="btn small" data-stock-adjust="${html(product.kind)}|${html(product.id)}|-100">-100</button><button class="btn small" data-stock-adjust="${html(product.kind)}|${html(product.id)}|-10">-10</button><button class="btn small" data-stock-adjust="${html(product.kind)}|${html(product.id)}|-1">-1</button><button class="btn success small" data-stock-adjust="${html(product.kind)}|${html(product.id)}|1">+1</button><button class="btn success small" data-stock-adjust="${html(product.kind)}|${html(product.id)}|10">+10</button><button class="btn success small" data-stock-adjust="${html(product.kind)}|${html(product.id)}|100">+100</button><button class="btn primary small" data-stock-set="${html(product.kind)}|${html(product.id)}">กำหนด</button></div>
+    <div class="inventory-actions"><button class="btn small" data-stock-adjust="${html(product.kind)}|${html(product.id)}|-100" ${busy?'disabled':''}>-100</button><button class="btn small" data-stock-adjust="${html(product.kind)}|${html(product.id)}|-10" ${busy?'disabled':''}>-10</button><button class="btn small" data-stock-adjust="${html(product.kind)}|${html(product.id)}|-1" ${busy?'disabled':''}>-1</button><button class="btn success small" data-stock-adjust="${html(product.kind)}|${html(product.id)}|1" ${busy?'disabled':''}>+1</button><button class="btn success small" data-stock-adjust="${html(product.kind)}|${html(product.id)}|10" ${busy?'disabled':''}>+10</button><button class="btn success small" data-stock-adjust="${html(product.kind)}|${html(product.id)}|100" ${busy?'disabled':''}>+100</button><button class="btn primary small" data-stock-set="${html(product.kind)}|${html(product.id)}" ${busy?'disabled':''}>กำหนด</button></div>
   </article>`;
 }
 
@@ -945,7 +961,7 @@ function wikiGalleryModal() {
 }
 
 function adminBootstrapData() {
-  return {seals:state.seals||[],gameItems:state.items||[],services:state.services||[],settings:state.settings||{},orders:[],deletedOrders:[],orderItems:[],logs:[],stockLogs:[],customers:[],customerInteractions:[],promotions:state.promotions||[],trash:[],security:{actor:state.adminUser||{}},automation:{},databaseVersion:''};
+  return {seals:state.seals||[],gameItems:state.items||[],services:state.services||[],settings:state.settings||{},orders:[],deletedOrders:[],orderItems:[],logs:[],stockLogs:[],stockUpdatedAt:'',customers:[],customerInteractions:[],promotions:state.promotions||[],trash:[],security:{actor:state.adminUser||{}},automation:{},databaseVersion:''};
 }
 
 async function loadAdmin(force = true) {
@@ -955,7 +971,7 @@ async function loadAdmin(force = true) {
   if (!state.adminData) { state.adminData = adminBootstrapData(); render(); }
   try {
     const data = await apiPost({action:'getAdminData',token:state.adminToken});
-    state.adminData = { seals: data.seals || [], gameItems: data.gameItems || [], services: data.services || [], settings: data.settings || {}, orders: data.orders || [], deletedOrders:data.deletedOrders||[], orderItems:data.orderItems||[], logs: data.logs || [], stockLogs: data.stockLogs || [], customers: data.customers || [], customerInteractions:data.customerInteractions||[], promotions: data.promotions || [], trash: data.trash || [], security: data.security || {}, automation: data.automation || {}, databaseVersion:data.databaseVersion||'' };
+    state.adminData = { seals: data.seals || [], gameItems: data.gameItems || [], services: data.services || [], settings: data.settings || {}, orders: data.orders || [], deletedOrders:data.deletedOrders||[], orderItems:data.orderItems||[], logs: data.logs || [], stockLogs: data.stockLogs || [], stockUpdatedAt:data.stockUpdatedAt||'', customers: data.customers || [], customerInteractions:data.customerInteractions||[], promotions: data.promotions || [], trash: data.trash || [], security: data.security || {}, automation: data.automation || {}, databaseVersion:data.databaseVersion||'' };
     state.adminLoadedAt = Date.now();
     if(data.security&&data.security.actor){state.adminUser={...(state.adminUser||{}),...data.security.actor};sessionStorage.setItem('dmo_admin_user',JSON.stringify(state.adminUser));}
     render();
@@ -1110,18 +1126,25 @@ async function saveSettingsAction() {
 
 
 async function adjustStockAction(kind, id, delta) {
+  if(state.stockActionPending)return;
   const product = (kind === 'SEAL' ? state.adminData.seals : state.adminData.gameItems).find((entry) => entry.id === id);
-  const reason = prompt(`เหตุผลในการ${delta >= 0 ? 'เพิ่ม' : 'ลด'}สต๊อก ${product ? product.name : ''}`, delta >= 0 ? 'เติมสต๊อก' : 'ขาย/นำออก');
+  if(!product)return toast('ไม่พบสินค้า');
+  const reason = prompt(`เหตุผลในการ${delta >= 0 ? 'เพิ่ม' : 'ลด'}สต๊อก ${product.name}`, delta >= 0 ? 'เติมของเข้า' : 'ขาย/นำออก');
   if (reason === null) return;
+  if(!String(reason).trim())return toast('กรุณาระบุเหตุผล');
+  if(!confirm(`ยืนยัน${delta>=0?'เพิ่ม':'ลด'} ${product.name} ${Math.abs(delta).toLocaleString('th-TH')} ${product.unit||'ชิ้น'}?`))return;
+  const fingerprint=`ADJUST|${kind}|${id}|${delta}|${String(reason).trim()}`,requestId=state.stockPendingRequests[fingerprint]||(state.stockPendingRequests[fingerprint]=crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(16).slice(2)}`);
   try {
-    await apiPost({ action: 'adjustStock', token: state.adminToken, kind, id, delta, reason });
-    toast('ปรับสต๊อกแล้ว');
-    await loadAdmin();
-    await loadData(false);
-  } catch (error) { toast(error.message); }
+    state.stockActionPending=fingerprint;state.stockActionResult={message:'กำลังอัปเดต Stock กรุณารอสักครู่...',detail:product.name};render();
+    const data=await apiPost({ action: 'adjustStock', token: state.adminToken, kind, id, delta, reason:String(reason).trim(),requestId });
+    delete state.stockPendingRequests[fingerprint];state.stockActionResult={message:data.duplicate?'คำขอนี้สำเร็จแล้ว ระบบไม่เพิ่มซ้ำ':'เพิ่ม Stock สำเร็จ',detail:`${data.productName}: ${money(data.beforeStock)} → ${Number(data.changeAmount)>0?'+':''}${money(data.changeAmount)} → ${money(data.stock)} • ${new Date(data.updatedAt).toLocaleString('th-TH')}`};
+    toast(state.stockActionResult.message);await loadAdmin(true);await loadData(false);
+  } catch (error) { state.stockActionResult={message:'ไม่สามารถอัปเดต Stock ได้ กรุณาลองใหม่',detail:error.message};toast(error.message); }
+  finally{state.stockActionPending='';render();}
 }
 
 async function setStockAction(kind, id) {
+  if(state.stockActionPending)return;
   const product = (kind === 'SEAL' ? state.adminData.seals : state.adminData.gameItems).find((entry) => entry.id === id);
   if (!product) return;
   const stockTextValue = prompt(`กำหนดสต๊อกทั้งหมดของ ${product.name}\nเว้นว่าง = ต้องตรวจสอบสต๊อก`, product.stock === '' ? '' : product.stock);
@@ -1131,18 +1154,31 @@ async function setStockAction(kind, id) {
   const lowText = prompt('แจ้งเตือนเมื่อคงเหลือขายต่ำกว่าหรือเท่าไร', product.lowStockAlert || 0);
   if (lowText === null) return;
   const reason = prompt('เหตุผล', 'กำหนดสต๊อก') ?? 'กำหนดสต๊อก';
+  const fingerprint=`SET|${kind}|${id}|${stockTextValue}|${reservedText}|${lowText}|${reason}`,requestId=state.stockPendingRequests[fingerprint]||(state.stockPendingRequests[fingerprint]=crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(16).slice(2)}`);
   try {
+    state.stockActionPending=fingerprint;state.stockActionResult={message:'กำลังอัปเดต Stock กรุณารอสักครู่...',detail:product.name};render();
     await apiPost({
       action: 'setStock', token: state.adminToken, kind, id,
       stock: stockTextValue === '' ? '' : Number(stockTextValue),
       reservedStock: Number(reservedText) || 0,
       lowStockAlert: Number(lowText) || 0,
-      reason,
+      reason,requestId,
     });
+    delete state.stockPendingRequests[fingerprint];
     toast('บันทึกสต๊อกแล้ว');
-    await loadAdmin();
+    state.stockActionResult={message:'บันทึก Stock สำเร็จ',detail:product.name};await loadAdmin(true);
     await loadData(false);
-  } catch (error) { toast(error.message); }
+  } catch (error) {state.stockActionResult={message:'ไม่สามารถอัปเดต Stock ได้ กรุณาลองใหม่',detail:error.message};toast(error.message);}
+  finally{state.stockActionPending='';render();}
+}
+
+async function addStockFromForm(){
+  if(state.stockActionPending)return;const selected=document.getElementById('stockAddProduct')?.value||'',amount=Number(document.getElementById('stockAddAmount')?.value),reason=String(document.getElementById('stockAddReason')?.value||'').trim();
+  if(!selected)return toast('กรุณาเลือกสินค้า');if(!Number.isFinite(amount)||amount<=0)return toast('จำนวนที่เพิ่มต้องมากกว่า 0');if(!Number.isInteger(amount))return toast('จำนวนที่เพิ่มต้องเป็นจำนวนเต็ม');if(!reason)return toast('กรุณาระบุเหตุผล');
+  const [kind,id]=selected.split('|'),list=kind==='SEAL'?state.adminData.seals:state.adminData.gameItems,product=list.find(x=>String(x.id)===String(id));if(!product)return toast('ไม่พบสินค้า');
+  const fingerprint=`ADD|${kind}|${id}|${amount}|${reason}`;if(state.stockConfirmFingerprint!==fingerprint){state.stockConfirmFingerprint=fingerprint;state.stockActionResult={message:`ยืนยันเพิ่ม ${product.name} ${money(amount)} ${product.unit||'ชิ้น'}?`,detail:'ตรวจสอบข้อมูล แล้วกด “ยืนยันเพิ่ม Stock” อีกครั้ง'};render();return;}
+  const requestId=state.stockPendingRequests[fingerprint]||(state.stockPendingRequests[fingerprint]=crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  try{state.stockConfirmFingerprint='';state.stockActionPending='ADD_FORM';state.stockActionResult={message:'กำลังอัปเดต Stock กรุณารอสักครู่...',detail:product.name};render();const data=await apiPost({action:'adjustStock',token:state.adminToken,kind,id,delta:amount,reason,requestId});delete state.stockPendingRequests[fingerprint];state.stockAddDraft={product:'',amount:'',reason:'เติมของเข้า'};state.stockActionResult={message:data.duplicate?'คำขอนี้สำเร็จแล้ว ระบบไม่เพิ่มซ้ำ':'เพิ่ม Stock สำเร็จ',detail:`${data.productName}: เดิม ${money(data.beforeStock)} • เพิ่ม ${money(data.changeAmount)} • ใหม่ ${money(data.stock)} • ${new Date(data.updatedAt).toLocaleString('th-TH')}`};toast(state.stockActionResult.message);await loadAdmin(true);await loadData(false);}catch(error){state.stockActionResult={message:'ไม่สามารถอัปเดต Stock ได้ กรุณาลองใหม่',detail:error.message};toast(error.message);}finally{state.stockActionPending='';render();}
 }
 
 function addToCartSilent(product, quantity) {
@@ -1219,7 +1255,14 @@ function bind() {
   const changeOwnerPasswordBtn=document.getElementById('changeOwnerPasswordBtn');if(changeOwnerPasswordBtn)changeOwnerPasswordBtn.onclick=async()=>{if(state.adminActionPending)return;const currentPassword=document.getElementById('ownerCurrentPassword').value,newPassword=document.getElementById('ownerNewPassword').value,confirmPassword=document.getElementById('ownerConfirmPassword').value;if(newPassword.length<10)return toast('รหัสผ่านใหม่ต้องมีอย่างน้อย 10 ตัวอักษร');if(newPassword!==confirmPassword)return toast('รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน');try{state.adminActionPending='OWNER_PASSWORD';changeOwnerPasswordBtn.disabled=true;changeOwnerPasswordBtn.textContent='กำลังเปลี่ยนรหัสผ่าน...';const data=await apiPost({action:'changeOwnerPassword',token:state.adminToken,currentPassword,newPassword,confirmPassword});state.adminToken='';state.adminData=null;state.adminUser=null;sessionStorage.removeItem('dmo_admin_token');sessionStorage.removeItem('dmo_admin_user');sessionStorage.removeItem('dmo_admin_activity');render();toast(data.message||'เปลี่ยนรหัสผ่านสำเร็จ กรุณาเข้าสู่ระบบอีกครั้ง');}catch(e){toast(e.message);}finally{state.adminActionPending='';}};
   const reloadInventory = document.getElementById('reloadInventoryBtn'); if (reloadInventory) reloadInventory.onclick = () => loadAdmin();
   const inventorySearch = document.getElementById('inventorySearch'); if (inventorySearch) inventorySearch.oninput = (event) => { state.inventorySearch = event.target.value; scheduleInputRender('inventorySearch', 80); };
+  const inventorySort=document.getElementById('inventorySort');if(inventorySort)inventorySort.onchange=()=>{state.inventorySort=inventorySort.value;render();};
   document.querySelectorAll('[data-inventory-filter]').forEach((button) => button.onclick = () => { state.inventoryFilter = button.dataset.inventoryFilter; render(); });
+  const stockAddBtn=document.getElementById('stockAddBtn');if(stockAddBtn)stockAddBtn.onclick=addStockFromForm;
+  const stockAddProduct=document.getElementById('stockAddProduct'),stockAddAmount=document.getElementById('stockAddAmount'),stockAddReason=document.getElementById('stockAddReason');
+  if(stockAddProduct)stockAddProduct.onchange=()=>{state.stockAddDraft.product=stockAddProduct.value;state.stockConfirmFingerprint='';};
+  if(stockAddAmount)stockAddAmount.oninput=()=>{state.stockAddDraft.amount=stockAddAmount.value;state.stockConfirmFingerprint='';};
+  if(stockAddReason)stockAddReason.oninput=()=>{state.stockAddDraft.reason=stockAddReason.value;state.stockConfirmFingerprint='';};
+  const syncStockBtn=document.getElementById('syncStockBtn');if(syncStockBtn)syncStockBtn.onclick=async()=>{if(state.stockActionPending)return;try{state.stockActionPending='SYNC';state.stockActionResult={message:'กำลังซิงก์ Stock จาก Google Sheet...',detail:''};render();const data=await apiPost({action:'syncStock',token:state.adminToken});await loadAdmin(true);await loadData(false);state.stockActionResult={message:'ซิงก์ Stock สำเร็จ',detail:data.stockUpdatedAt?new Date(data.stockUpdatedAt).toLocaleString('th-TH'):''};toast('ซิงก์ Stock สำเร็จ');}catch(error){state.stockActionResult={message:'ซิงก์ Stock ไม่สำเร็จ',detail:error.message};toast(error.message);}finally{state.stockActionPending='';render();}};
   document.querySelectorAll('[data-stock-adjust]').forEach((button) => button.onclick = () => { const [kind, id, delta] = button.dataset.stockAdjust.split('|'); adjustStockAction(kind, id, Number(delta)); });
   document.querySelectorAll('[data-stock-set]').forEach((button) => button.onclick = () => { const [kind, id] = button.dataset.stockSet.split('|'); setStockAction(kind, id); });
 
