@@ -303,6 +303,9 @@ function upsert(record,actor){return withLock(()=>{
   const values=s.getDataRange().getValues(),idIndex=headers.indexOf('id');let rowIndex=-1;
   for(let i=1;i<values.length;i++){if(String(values[i][idIndex])===String(record.id)){rowIndex=i+1;break;}}
   const row=headers.map(k=>k==='aliases'&&Array.isArray(record.aliases)?record.aliases.join('|'):(record[k]??''));
+  if(rowIndex<0&&record.kind==='SEAL'){
+    for(let i=1;i<values.length;i++)if(!String(values[i][idIndex]||'').trim()){rowIndex=i+1;break;}
+  }
   if(rowIndex<0)s.appendRow(row);else s.getRange(rowIndex,1,1,headers.length).setValues([row]);
   sortCatalog(s,headers,record.kind);
   log('UPSERT',record.kind,record.id,record.name,JSON.stringify({price:record.price,stock:record.stock,status:record.status,actor:actor||'SYSTEM'}));
@@ -392,9 +395,18 @@ function bulkUpdate(records,changes,actor){return withLock(()=>{
 });}
 function removeRecord(kind,id){return softDelete(kind,id);}
 function sortCatalog(s,headers,kind){
-  if(s.getLastRow()<3)return;const sort=[];
-  if(kind==='SEAL')sort.push({column:headers.indexOf('category')+1,ascending:true},{column:headers.indexOf('section')+1,ascending:true});
-  else if(kind==='SERVICE')sort.push({column:headers.indexOf('serviceCategory')+1,ascending:true});
+  if(s.getLastRow()<3)return;
+  if(kind==='SEAL'){
+    const lastRow=s.getLastRow(),lastColumn=s.getLastColumn(),range=s.getRange(2,1,lastRow-1,lastColumn),values=range.getValues(),idc=headers.indexOf('id'),categoryc=headers.indexOf('category'),sectionc=headers.indexOf('section'),sortc=headers.indexOf('sortOrder'),namec=headers.indexOf('name'),categoryOrder={AT:0,HT:1,CT:2,HP:3,DS:4,DE:5,EV:6,BL:7},sectionOrder={NORMAL:0,BASE_HARD:1,SUSA:2},seen=new Set();
+    const records=values.map((row,index)=>({row,index})).filter(x=>String(x.row[idc]||'').trim());
+    records.forEach(x=>{const id=String(x.row[idc]),category=String(x.row[categoryc]),section=String(x.row[sectionc]);if(seen.has(id))throw Error('พบ Product ID ซ้ำ: '+id);if(categoryOrder[category]===undefined||sectionOrder[section]===undefined)throw Error('ข้อมูลสาย/ประเภทไม่ถูกต้อง: '+id);seen.add(id);});
+    records.sort((a,b)=>categoryOrder[a.row[categoryc]]-categoryOrder[b.row[categoryc]]||sectionOrder[a.row[sectionc]]-sectionOrder[b.row[sectionc]]||number(a.row[sortc])-number(b.row[sortc])||String(a.row[namec]).localeCompare(String(b.row[namec]),'th')||a.index-b.index);
+    const outputRows=records.map(x=>x.row).concat(Array.from({length:values.length-records.length},()=>Array(lastColumn).fill('')));
+    range.setValues(outputRows);
+    return;
+  }
+  const sort=[];
+  if(kind==='SERVICE')sort.push({column:headers.indexOf('serviceCategory')+1,ascending:true});
   else sort.push({column:headers.indexOf('itemCategory')+1,ascending:true});
   sort.push({column:headers.indexOf('sortOrder')+1,ascending:true},{column:headers.indexOf('name')+1,ascending:true});
   s.getRange(2,1,s.getLastRow()-1,s.getLastColumn()).sort(sort);
@@ -687,8 +699,9 @@ function onEdit(e){
     markStockUpdated();invalidatePublicCache();
   }catch(err){try{SpreadsheetApp.getActive().toast('บันทึก Stock แล้ว แต่บันทึกประวัติ/Sync ไม่สำเร็จ: '+safeAdminError(err),'GUN SHOP DMO',8);}catch(ignore){}}
 }
-function onOpen(){SpreadsheetApp.getUi().createMenu('GUN SHOP DMO').addItem('ตรวจโครงสร้างฐานข้อมูล','menuInitialize').addItem('ตั้งค่า/กู้คืน OWNER (เจ้าของไฟล์เท่านั้น)','initializeOwnerPassword').addToUi();}
+function onOpen(){SpreadsheetApp.getUi().createMenu('GUN SHOP DMO').addItem('ตรวจโครงสร้างฐานข้อมูล','menuInitialize').addItem('จัดเรียง Seals ตามสาย/ประเภท','menuSortSeals').addItem('ตั้งค่า/กู้คืน OWNER (เจ้าของไฟล์เท่านั้น)','initializeOwnerPassword').addToUi();}
 function menuInitialize(){ensureDatabase();SpreadsheetApp.getUi().alert('ฐานข้อมูล GUN SHOP DMO V20.1 พร้อมใช้งาน');}
+function menuSortSeals(){withLock(()=>{const s=sheet(SHEETS.seals,HEADERS.seals);sortCatalog(s,HEADERS.seals,'SEAL');invalidatePublicCache();});SpreadsheetApp.getUi().alert('จัดเรียง Seals ตามสายและประเภทเรียบร้อยแล้ว');}
 function verifyLegacyMigration(){
   const orders=rows(SHEETS.orders),items=rows(SHEETS.orderItems),legacy=orders.filter(o=>String(o.legacyOrder||'').toUpperCase()==='TRUE'),orderIds=new Set(orders.map(o=>String(o.orderId))),itemIds=items.map(x=>String(x.orderItemId)),orphans=items.filter(x=>!orderIds.has(String(x.orderId))),duplicates=itemIds.length-new Set(itemIds).size,products=[...rows(SHEETS.seals),...rows(SHEETS.items)],reservedTotal=products.reduce((sum,p)=>sum+number(p.reservedStock),0),legacyStockLogs=rows(SHEETS.stockLogs).filter(x=>legacy.some(o=>String(x.reason||'').includes(String(o.orderId)))),integrity=runIntegrityCheck();
   const result={orders:orders.length,orderItems:items.length,legacyOrders:legacy.length,orphanOrderItems:orphans.length,duplicateOrderItemIds:duplicates,reservedStockTotal:reservedTotal,legacyStockLogs:legacyStockLogs.length,integrity:integrity.summary};
