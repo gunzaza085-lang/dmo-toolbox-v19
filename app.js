@@ -152,6 +152,11 @@ const html = (s) => String(s ?? '').replace(/[&<>'"]/g, (c) => ({ '&': '&amp;', 
 const isVisible = (p) => !['HIDDEN', 'INACTIVE'].includes(String(p.status || 'ACTIVE'));
 const availableStock = (p) => p.availableStock !== undefined ? p.availableStock : (p.stock === '' ? '' : Math.max(0, Number(p.stock || 0) - Number(p.reservedStock || 0)));
 const canBuy = (p) => isVisible(p) && String(p.status) !== 'OUT_OF_STOCK' && !(availableStock(p) !== '' && availableStock(p) <= 0);
+const productMaxQty = (p) => {
+  const available = availableStock(p);
+  return available === '' ? 9999 : Math.max(0, Math.floor(Number(available) || 0));
+};
+const stockLimitMessage = (p) => `มีสินค้าเหลือ ${money(productMaxQty(p))} ${saleUnit(p)}`;
 const allProducts = () => [...state.seals, ...state.items, ...state.services];
 const productKey = (product) => `${product.kind}|${product.id}`;
 const isFavorite = (product) => state.favoriteKeys.includes(productKey(product));
@@ -355,7 +360,7 @@ function productCard(product) {
     : `<div class="product-img placeholder"><span>${product.kind === 'SEAL' ? '🦖' : product.kind === 'SERVICE' ? '⚔️' : '🎒'}</span></div>`;
   const description = product.description ? `<div class="product-description">${html(product.description)}</div>` : '';
   return `<article class="product-card">
-    <div class="image-wrap">${image}${product.badge ? `<span class="sale-badge">${html(product.badge)}</span>` : ''}<button class="favorite-btn ${isFavorite(product) ? 'active' : ''}" data-favorite="${html(productKey(product))}" aria-label="รายการโปรด">${isFavorite(product) ? '♥' : '♡'}</button></div>
+    <div class="image-wrap">${image}<button class="favorite-btn ${isFavorite(product) ? 'active' : ''}" data-favorite="${html(productKey(product))}" aria-label="รายการโปรด">${isFavorite(product) ? '♥' : '♡'}</button></div>
     <div class="product-main">
       <div class="product-name">${html(product.name)}</div>
       <div class="product-meta">${productMeta(product)}</div>
@@ -365,7 +370,7 @@ function productCard(product) {
       ${product.wikiUrl ? `<a class="wiki-link" href="${html(product.wikiUrl)}" target="_blank" rel="noopener">📚 ดูข้อมูล DMO Wiki</a>` : ''}
     </div>
     <div class="product-actions">
-      <input class="qty-input" type="number" min="1" step="1" value="1" data-qty="${html(product.id)}" ${canBuy(product) ? '' : 'disabled'}>
+      <input class="qty-input" type="number" min="1" max="${productMaxQty(product)}" step="1" value="1" data-qty="${html(product.id)}" ${canBuy(product) ? '' : 'disabled'}>
       <button class="btn primary small" data-add="${html(product.id)}" ${canBuy(product) ? '' : 'disabled'}>+ เพิ่ม</button>
     </div>
   </article>`;
@@ -374,6 +379,7 @@ function productCard(product) {
 function shopPage() {
   const products = filteredProducts();
   const suggestions = state.search && !state.selectedSearchKey ? searchSuggestions() : [];
+  const servicePoster = state.catalogType === 'SERVICE' ? state.services.find((product) => product.imageUrl) : null;
   return `<div class="grid-main">
     <section class="panel">
       <div class="shop-heading"><div><h2 class="panel-title">${state.wishlistOnly ? '❤️ รายการโปรด' : state.catalogType === 'SEAL' ? 'รายการซีล' : state.catalogType === 'ITEM' ? 'ไอเทมในเกม' : 'บริการของร้าน'}</h2><p class="product-meta">${state.wishlistOnly ? 'รายการโปรดเก็บอยู่ในอุปกรณ์เครื่องนี้' : 'เลือกจำนวนและเพิ่มลงรายการ จากนั้นส่งให้ร้านตรวจสอบสต๊อก'}</p></div></div>
@@ -383,6 +389,7 @@ function shopPage() {
         ${state.catalogType === 'SEAL' ? `<div class="chip-row">${['ALL', 'AT', 'HT', 'CT', 'HP', 'DS', 'DE', 'EV', 'BL'].map((category) => `<button class="filter-chip ${state.category === category ? 'active' : ''}" data-cat="${category}">${category === 'ALL' ? 'ทั้งหมด' : category}</button>`).join('')}</div>
         <div class="chip-row">${[['ALL', 'ทุกประเภท'], ['NORMAL', 'ปกติ'], ['BASE_HARD', 'เบสยาก'], ['SUSA', 'ซูซา']].map(([value, label]) => `<button class="filter-chip ${state.section === value ? 'active' : ''}" data-sec="${value}">${label}</button>`).join('')}</div>` : ''}
       </div>
+      ${servicePoster ? `<div class="service-poster"><img src="${html(servicePoster.imageUrl)}" alt="${html(servicePoster.name)}"><div><span>บริการจาก GUN SHOP DMO</span><strong>${html(servicePoster.name)}</strong><small>${html(servicePoster.description || 'เลือกบริการและเพิ่มลงตะกร้าได้จากรายการด้านล่าง')}</small></div></div>` : ''}
       <div class="search-summary">พบ ${products.length} รายการ${state.search ? ` สำหรับ “${html(state.search)}”` : ''}</div><div class="products">${products.length ? products.map(productCard).join('') : '<div class="empty">ไม่พบสินค้า ลองตรวจคำสะกดหรือค้นด้วยชื่ออังกฤษ/ชื่อเรียกอื่น</div>'}</div>
     </section>
     ${cartPanel()}
@@ -390,9 +397,11 @@ function shopPage() {
 }
 
 function cartItem(item) {
+  const product = allProducts().find((entry) => entry.id === item.id && entry.kind === item.kind);
+  const atLimit = product && item.quantity >= productMaxQty(product);
   return `<div class="cart-item">
     <div><b>${html(item.name)}</b><div class="product-meta">${money(item.quantity)} ${html(item.unit)} × ${money(item.price)} = ${money(item.quantity * item.price)} บาท</div></div>
-    <div class="cart-controls"><button class="btn small" data-dec="${html(item.id)}">−</button><b>${money(item.quantity)}</b><button class="btn small" data-inc="${html(item.id)}">+</button><button class="btn danger small" data-remove="${html(item.id)}" style="grid-column:1/-1">ลบ</button></div>
+    <div class="cart-controls"><button class="btn small" data-dec="${html(item.id)}">−</button><b>${money(item.quantity)}</b><button class="btn small" data-inc="${html(item.id)}" ${atLimit ? 'disabled' : ''}>+</button><button class="btn danger small" data-remove="${html(item.id)}" style="grid-column:1/-1">ลบ</button></div>
   </div>`;
 }
 
@@ -404,18 +413,19 @@ function promoIsActive(p){
 }
 function pricingSummary(){
   const subtotal=state.cart.reduce((sum,item)=>sum+item.price*item.quantity,0);
+  const sealSubtotal=state.cart.filter(item=>item.kind==='SEAL').reduce((sum,item)=>sum+item.price*item.quantity,0);
   let discount=0;const messages=[];
   const promos=(state.promotions||[]).filter(promoIsActive).sort((a,b)=>(Number(a.priority)||999)-(Number(b.priority)||999));
   for(const p of promos){
     const min=Number(p.minSpend)||0;if(subtotal<min)continue;
     if(p.type==='DISCOUNT_PERCENT'||p.type==='FLASH_SALE'){const d=subtotal*(Math.max(0,Math.min(100,Number(p.value)||0))/100);discount+=d;messages.push(`${p.name}: ลด ${money(d)} บาท`);}
     else if(p.type==='DISCOUNT_AMOUNT'){const d=Math.min(subtotal,Math.max(0,Number(p.value)||0));discount+=d;messages.push(`${p.name}: ลด ${money(d)} บาท`);}
-    else if(p.type==='REWARD_PER_SPEND'){const step=Number(p.minSpend)||100,reward=Number(p.value)||0,count=Math.floor(subtotal/step);if(count>0)messages.push(p.rewardText||`${p.name}: ได้รับ ${money(count*reward)}`);}
+    else if(p.type==='REWARD_PER_SPEND'){const step=Number(p.minSpend)||100,reward=Number(p.value)||0,count=Math.floor(sealSubtotal/step);if(count>0)messages.push(`${p.name}: ได้รับ ${money(count*reward)} D2 จากยอดซีล ${money(sealSubtotal)} บาท`);}
     else if(p.rewardText)messages.push(p.rewardText);
     if(String(p.stackable)==='FALSE')break;
   }
   discount=Math.min(subtotal,discount);
-  return{subtotal,discount,total:Math.max(0,subtotal-discount),messages};
+  return{subtotal,sealSubtotal,discount,total:Math.max(0,subtotal-discount),messages};
 }
 
 function cartPanel() {
@@ -423,14 +433,14 @@ function cartPanel() {
   const total = pricing.total;
   const subtotal = pricing.subtotal;
   const threshold = Number(state.settings.promoThreshold) || 100;
-  const promotionSets = Math.floor(total / threshold);
-  const remaining = total ? threshold - (total % threshold) : threshold;
+  const promotionSets = Math.floor(pricing.sealSubtotal / threshold);
+  const remaining = pricing.sealSubtotal ? threshold - (pricing.sealSubtotal % threshold) : threshold;
   return `<aside class="panel cart-panel">
     <h2 class="panel-title">🛒 รายการที่เลือก (${state.cart.length})</h2>
     <div class="checkout-steps"><span class="done"><b>1</b> เลือกสินค้า</span><span class="${state.cart.length ? 'active' : ''}"><b>2</b> กรอกข้อมูล</span><span><b>3</b> รับเลขออเดอร์</span></div>
     <div class="cart-list">${state.cart.length ? state.cart.map(cartItem).join('') : '<div class="empty">ยังไม่มีสินค้า</div>'}</div>
     <div class="total-box"><span>${pricing.discount>0?`ยอดสินค้า ${money(subtotal)} • ส่วนลด ${money(pricing.discount)}`:`รวมทั้งหมด`}</span><span class="total-price">${money(total)} บาท</span></div>${pricing.messages.length?`<div class="promo">${pricing.messages.map(html).join("<br>")}</div>`:""}
-    <div class="promo">${promotionSets > 0 ? `🎁 ได้รับโปร D2 ${promotionSets} ชุด (${money(promotionSets * (Number(state.settings.promoReward) || 150))} อัน)` : `ยังไม่ได้รับโปร D2<br>ซื้อเพิ่มอีก ${money(remaining)} บาทเพื่อรับชุดถัดไป`}</div>
+    <div class="promo">${promotionSets > 0 ? `🎁 โปร D2 คิดจากยอดซีลเท่านั้น: ${money(pricing.sealSubtotal)} บาท<br>ได้รับ D2 ${money(promotionSets * (Number(state.settings.promoReward) || 150))} อัน` : `โปร D2 คิดจากยอดซีลเท่านั้น<br>ซื้อซีลเพิ่มอีก ${money(remaining)} บาทเพื่อรับ D2`}</div>
     <div class="customer-fields">
       <input id="tamer" placeholder="ชื่อเทมเมอร์" value="${html(state.customer.tamer)}">
       <div class="security-note">🌐 ให้บริการเฉพาะเซิร์ฟเวอร์ ลิเวียมอน</div>
@@ -452,7 +462,7 @@ function addToCart(id, quantity) {
   const nextQuantity = (existing ? existing.quantity : 0) + quantity;
   const available = availableStock(product);
   if (available !== '' && nextQuantity > available) {
-    toast(`สต๊อกพร้อมขายมี ${available} ${product.unit}`);
+    toast(stockLimitMessage(product));
     return;
   }
   if (existing) existing.quantity = nextQuantity;
@@ -464,9 +474,9 @@ function orderText(customer = {}) {
   const pricing = pricingSummary();
   const total = pricing.total;
   const threshold = Number(state.settings.promoThreshold) || 100;
-  const promotionSets = Math.floor(total / threshold);
-  const remaining = total ? threshold - (total % threshold) : threshold;
-  return `🛒 รายการสั่งซื้อ DMO\n\n${state.cart.map((item) => `${item.name} ${money(item.quantity)} ${item.unit} — ${money(item.price * item.quantity)} บาท`).join('\n')}\n\n${pricing.discount>0?`ยอดสินค้า ${money(pricing.subtotal)} บาท\nส่วนลด ${money(pricing.discount)} บาท\n`:''}รวมทั้งหมด ${money(total)} บาท${pricing.messages.length?`\n\nโปรโมชั่นอื่น:\n${pricing.messages.join('\n')}`:''}\n\n${promotionSets > 0 ? `โปรโมชั่น D2: ได้รับ ${promotionSets} ชุด (${money(promotionSets * (Number(state.settings.promoReward) || 150))} อัน)` : `โปรโมชั่น D2: ยังไม่ได้รับ\nยอดที่ต้องซื้อเพิ่มเพื่อรับ D2: ${money(remaining)} บาท`}\n\nชื่อเทมเมอร์: ${customer.tamer || '__________'}\nเซิร์ฟเวอร์: ${customer.server || '__________'}\nช่องทางติดต่อ: ${customer.contact || '__________'}\n\n⚠️ ${state.settings.orderNotice || 'รายการนี้ยังไม่ใช่การยืนยันคำสั่งซื้อ กรุณารอร้านตรวจสอบสต๊อกและยืนยันยอดก่อนโอน'}`;
+  const promotionSets = Math.floor(pricing.sealSubtotal / threshold);
+  const remaining = pricing.sealSubtotal ? threshold - (pricing.sealSubtotal % threshold) : threshold;
+  return `🛒 รายการสั่งซื้อ DMO\n\n${state.cart.map((item) => `${item.name} ${money(item.quantity)} ${item.unit} — ${money(item.price * item.quantity)} บาท`).join('\n')}\n\n${pricing.discount>0?`ยอดสินค้า ${money(pricing.subtotal)} บาท\nส่วนลด ${money(pricing.discount)} บาท\n`:''}รวมทั้งหมด ${money(total)} บาท${pricing.messages.length?`\n\nโปรโมชั่นอื่น:\n${pricing.messages.join('\n')}`:''}\n\nยอดซีลที่ร่วมโปร D2: ${money(pricing.sealSubtotal)} บาท\n${promotionSets > 0 ? `โปรโมชั่น D2: ได้รับ ${money(promotionSets * (Number(state.settings.promoReward) || 150))} อัน` : `โปรโมชั่น D2: ยังไม่ได้รับ\nซื้อซีลเพิ่มเพื่อรับ D2: ${money(remaining)} บาท`}\n\nชื่อเทมเมอร์: ${customer.tamer || '__________'}\nเซิร์ฟเวอร์: ${customer.server || '__________'}\nช่องทางติดต่อ: ${customer.contact || '__________'}\n\n⚠️ ${state.settings.orderNotice || 'รายการนี้ยังไม่ใช่การยืนยันคำสั่งซื้อ กรุณารอร้านตรวจสอบสต๊อกและยืนยันยอดก่อนโอน'}`;
 }
 
 async function copyText(text,message='คัดลอกข้อความแล้ว') {
@@ -1182,9 +1192,19 @@ async function addStockFromForm(){
 }
 
 function addToCartSilent(product, quantity) {
+  quantity = Math.max(1, Math.floor(Number(quantity) || 1));
   const existing = state.cart.find((entry) => entry.id === product.id);
-  if (existing) existing.quantity += quantity;
+  const nextQuantity = (existing ? existing.quantity : 0) + quantity;
+  const max = productMaxQty(product);
+  if (nextQuantity > max) {
+    if (existing) existing.quantity = max;
+    else if (max > 0) state.cart.push({ id: product.id, name: product.name, price: Number(product.price) || 0, unit: saleUnit(product), kind: product.kind, quantity: max });
+    toast(stockLimitMessage(product));
+    return false;
+  }
+  if (existing) existing.quantity = nextQuantity;
   else state.cart.push({ id: product.id, name: product.name, price: Number(product.price) || 0, unit: saleUnit(product), kind: product.kind, quantity });
+  return true;
 }
 
 function bind() {
@@ -1202,7 +1222,7 @@ function bind() {
   document.querySelectorAll('[data-recent-search]').forEach((button) => button.onclick = () => { state.search = button.dataset.recentSearch; state.selectedSearchKey = ''; render(); });
   const clearRecent = document.getElementById('clearRecentSearches'); if (clearRecent) clearRecent.onclick = () => { state.recentSearches = []; localStorage.removeItem('dmo_recent_searches'); render(); };
   document.querySelectorAll('[data-add]').forEach((button) => button.onclick = () => { const quantity = document.querySelector(`[data-qty="${CSS.escape(button.dataset.add)}"]`); addToCart(button.dataset.add, quantity && quantity.value); });
-  document.querySelectorAll('[data-inc]').forEach((button) => button.onclick = () => { const item = state.cart.find((entry) => entry.id === button.dataset.inc); if (item) item.quantity += 1; render(); });
+  document.querySelectorAll('[data-inc]').forEach((button) => button.onclick = () => { const item = state.cart.find((entry) => entry.id === button.dataset.inc); const product=item&&allProducts().find((entry)=>entry.id===item.id&&entry.kind===item.kind); if(item&&product){if(item.quantity>=productMaxQty(product))toast(stockLimitMessage(product));else item.quantity+=1;} render(); });
   document.querySelectorAll('[data-dec]').forEach((button) => button.onclick = () => { const item = state.cart.find((entry) => entry.id === button.dataset.dec); if (item) { item.quantity -= 1; if (item.quantity <= 0) state.cart = state.cart.filter((entry) => entry.id !== item.id); } render(); });
   document.querySelectorAll('[data-remove]').forEach((button) => button.onclick = () => { state.cart = state.cart.filter((entry) => entry.id !== button.dataset.remove); render(); });
   ['tamer', 'contact'].forEach((id) => { const input = document.getElementById(id); if (input) input.oninput = (event) => { state.customer[id] = event.target.value; }; });
