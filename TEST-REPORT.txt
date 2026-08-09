@@ -1,13 +1,150 @@
-DMO Toolbox Ultimate V19 - Static Validation
-=============================================
-PASS: V18 features retained
-PASS: app.js syntax
-PASS: GoogleAppsScript.gs syntax
-PASS: manifest.webmanifest valid JSON
-PASS: sw.js syntax
-PASS: PWA icons 192/512 included
-PASS: theme + mobile navigation hooks included
-PASS: offline public-data cache fallback included
-PASS: V19 database has no formula error matches
+GUN SHOP DMO V20.1 — TEST REPORT
+=================================
 
-Runtime checks still required after deployment: Google Drive authorization, scheduled trigger, PWA install prompt, and browser offline behavior.
+ผลในไฟล์นี้ต้องอัปเดตจากการรัน tests/v20_1_audit.js จริง
+
+LOCAL PASS TARGETS
+------------------
+- JavaScript syntax
+- Google Apps Script syntax
+- manifest.webmanifest JSON syntax
+- Promotion calculation
+- Order ID format
+- Invalid state transitions
+- Public DTO field allow-list
+- OrderItems include orderId
+- Picking Center required fields and grouped write guard
+- Role guard presence
+- Settings OWNER/ADMIN token guard
+- apiKey hidden from STAFF/VIEWER responses
+- Login throttling controls
+- Customer totals use COMPLETED
+- Current Analytics statuses
+- Integrity checker coverage
+- Terminal inventoryState must be RESERVED
+- Excel formula error scan
+- Workbook sheet/header schema comparison
+
+REQUIRES LIVE GOOGLE APPS SCRIPT TEST ENVIRONMENT
+-------------------------------------------------
+- Normal order
+- Insufficient-stock order
+- Duplicate request/retry end-to-end
+- Cancel order and release reservation
+- Complete order and deduct stock
+- Stock reservation exactly once
+- Picking Center write
+- OWNER / ADMIN / STAFF / VIEWER behavior end-to-end
+
+ห้ามเปลี่ยนรายการ REQUIRES LIVE เป็น PASS จนกว่าจะทดสอบกับสำเนา Google Sheet จริง
+
+ผลการรันล่าสุดในเครื่อง
+----------------------
+คำสั่ง: node tests/v20_1_audit.js
+PASS: 11 กลุ่มการตรวจ
+FAIL: 0
+NOT TESTED / REQUIRES LIVE GOOGLE APPS SCRIPT: 8 กลุ่ม
+
+PASS:
+1. JavaScript syntax
+5. Promotion calculation
+6. Order ID uniqueness format
+9. Invalid status transition
+13. Picking Center fields, OrderItems orderId, grouped picking write
+14. Public API data leak allow-list
+15-18. Role permission guards, settings token, apiKey role filter (static audit)
+19. Wrong login protection controls
+20. Customer totals source
+21. Analytics status compatibility
+22. Integrity reconciliation and inventoryState guard coverage
+
+PASS เพิ่มเติมที่รันจริง:
+- app.js / config.js / sw.js / GoogleAppsScript.gs syntax
+- manifest.webmanifest JSON syntax
+- Workbook มี 24 sheets; 21 data sheets ตรงกับ SHEETS/HEADERS ในโค้ด
+- Database version 3.1.0
+- Formula error scan พบ 0 รายการ
+
+NOT TESTED / REQUIRES LIVE GOOGLE APPS SCRIPT:
+2. Normal order
+3. Insufficient-stock order
+4. Duplicate submission/retry end-to-end
+7. Cancel/release reservation end-to-end
+8. Complete/deduct stock end-to-end
+10. Stock reservation exactly once
+11. Picking write end-to-end
+12. OWNER / ADMIN / STAFF / VIEWER behavior end-to-end
+
+ตรวจฐานข้อมูลเพิ่มเติม:
+PASS: Database version 3.1.0
+PASS: 24 sheets รวม OrderRequests
+PASS: Orders / Users headers V20.1
+PASS: known default OWNER changed to RESET_REQUIRED
+
+ORDER ARCHIVE RC — LOCAL EXECUTION (2026-08-09)
+------------------------------------------------
+Command: node tests/v20_1_audit.js
+PASS: 12 groups
+FAIL: 0
+LIVE / NOT VERIFIED: 8 groups
+
+PASS:
+- app.js and GoogleAppsScript.gs syntax
+- Order archive columns are additive: deletedAt, deletedBy, deleteReason
+- archiveOrder and restoreArchivedOrder require OWNER/ADMIN
+- Active RESERVED order archive uses CANCELLED inventory transition
+- CANCELLED/RELEASED archive does not release stock twice
+- COMPLETED/DEDUCTED archive does not restore stock
+- Restore does not call inventory transition and keeps stock state unchanged
+- Frontend archive/restore controls and duplicate-click pending guard exist
+- Database workbook Orders headers A1:Q1 match the new code
+- Database version remains 3.1.0
+- Workbook formula error scan: 0 matches
+
+NOT YET EXECUTED ON LIVE TEST APPS SCRIPT:
+- Archive active RESERVED order and verify release/logs exactly once
+- Archive CANCELLED/RELEASED order and verify no stock change
+- Archive COMPLETED/DEDUCTED order and verify no stock change
+- Restore archived order and verify no automatic stock mutation
+- Direct API role tests for OWNER/ADMIN/STAFF/VIEWER
+- Full mobile/desktop UI check with the updated TEST deployment
+FINAL CLEAN TEST + LIVE E2E (2026-08-09)
+----------------------------------------
+TEST Sheet ID: 1WPtJgFe7jswHafieD7zJ19pjSxrdFZACT4iLCi_PfLM
+Production Sheet / Production deployment: NOT TOUCHED
+
+PRE-CLEAN BACKUP: PASS
+- Backup: TEST-BACKUP-FINAL-CLEAN-20260809-021845
+- Backup file ID: 16KwvHrQre8u6JkqyyYkRnFGn0Gie4ur4YKrxhKEy2DA
+- Before cleanup: Orders 27, OrderItems 27, OrderRequests 27, RESERVED orders 7
+- Old TEST mismatch recorded: AT-BASE_HARD-28 expected release 6 / actual reserved 0; AT-NORMAL-8 expected 1 / actual 0
+
+CLEAN RESET: PASS
+- Orders 0; OrderItems 0; OrderRequests 0; Order Trash 0; reservedStock 0
+- Integrity errors 0, warnings 0
+- Preserved current TEST stock; only reservedStock was reset
+
+FINAL LIVE ORDER TESTS: PASS
+- Normal order: GUN-20260809-021959-2BAF8729, Gilmon 2 sets, total 40 baht
+- Duplicate request retry: PASS; no duplicate Order, OrderItems, or reservation
+- Insufficient stock: PASS; rejected without partial write
+- Picking write: PASS; completion required PICKED
+- State path: NEW > CHECKING > PREPARING > READY > COMPLETED
+- Complete/deduct: stock 50 > 48; reservedStock 2 > 0 exactly once
+- Terminal retry: PASS; no second deduction
+- Cancel order: GUN-20260809-022642-49B8F2A1
+- Cancel/release: stock stayed 48; reservedStock 1 > 0 exactly once
+- Cancel retry: PASS; no duplicate release
+- Archive/restore CANCELLED: PASS; stock 48 / reservedStock 0 unchanged
+- Archive/restore COMPLETED: PASS; stock 48 / reservedStock 0 unchanged
+- Archive and restore retries: PASS (idempotent)
+- Final Integrity: Orders 2, OrderItems 2, OrderRequests 2, errors 0, warnings 0
+
+SECURITY LIVE CHECKS: PASS
+- Public API: 231 seals; no costPrice, reservedStock, or passwordHash
+- Invalid token cannot run Integrity Checker
+- Live role matrix: PASS using temporary TEST-only users; ADMIN allowed, STAFF operational allowed but OWNER/ADMIN action denied, VIEWER write denied, apiKey/deletedOrders filtered; Users/Sessions restored afterward
+
+LOCAL REGRESSION AFTER LIVE TESTS
+- node tests/v20_1_audit.js: PASS 12, FAIL 0, LIVE markers 8
+PASS: formula error scan พบ 0 รายการ

@@ -1,0 +1,38 @@
+GUN SHOP DMO V20.1 — SECURITY NOTES
+====================================
+
+Public API
+----------
+ส่งเฉพาะข้อมูลหน้าร้านจาก allow-list เท่านั้น ไม่ส่งต้นทุน หมายเหตุภายใน API key,
+Reserved Stock, low-stock config, Users, Sessions, CRM, Backup หรือ Security settings
+
+รหัสผ่าน
+--------
+- ไม่มีการสร้างบัญชี OWNER พร้อมรหัสเริ่มต้นอัตโนมัติ
+- ใช้ salt แบบสุ่มต่อผู้ใช้และ iterative HMAC-SHA256
+- ไม่บันทึกหรือ log รหัสผ่าน plaintext
+- บัญชี V20 ที่ทราบ credential เดิมถูกตั้ง RESET_REQUIRED
+- ตั้งรหัสใหม่ผ่านเมนูใน Google Sheet โดยเจ้าของไฟล์
+
+Session และสิทธิ์
+-----------------
+- Admin data ใช้ authenticated POST body
+- OWNER จัดการผู้ใช้/Restore/Trigger ได้
+- ADMIN และ STAFF ทำงานร้านตามที่อนุญาต
+- VIEWER อ่านหลังบ้านได้ แต่เขียนไม่ได้
+- Login ผิดหลายครั้งจะถูกล็อกชั่วคราว
+
+ออเดอร์สาธารณะ
+---------------
+- Browser total ไม่มีอำนาจตัดสินยอด
+- Server อ่านราคาและโปรโมชั่นจาก Sheet
+- requestId ป้องกัน retry สร้างออเดอร์ซ้ำ
+- มี throttling เบื้องต้นตาม contact hash ภายใต้ข้อจำกัด Apps Script
+
+ข้อจำกัดที่ยังเหลือ
+-------------------
+- Google Apps Script ไม่มี transaction ฐานข้อมูลจริง ระบบจึงใช้ validation, Script Lock และ rollback แบบ best effort
+- CacheService throttling ไม่ใช่ WAF และไม่สามารถระบุ IP ลูกค้าได้
+- Session token ยังคงเก็บในชีตและ sessionStorage จึงต้องจำกัดสิทธิ์ Google Sheet อย่างเข้มงวด
+- ต้องทดสอบกับสำเนา Google Sheet จริงก่อน Production
+

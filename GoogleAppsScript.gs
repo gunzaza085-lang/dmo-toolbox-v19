@@ -1,16 +1,16 @@
 /**
- * DMO Toolbox Ultimate 2.1 API (V19 Mobile/PWA)
+ * GUN SHOP DMO 3.1 API (V20.1 Stability & Security Final)
  * - Customer: Seals, Items, Services, Orders
  * - Admin: Dashboard, calculator, catalog, orders, settings, logs
  * - DMO Wiki Seal Master image gallery + import to Google Drive
  */
-const SHEETS = { seals:'Seals', items:'Items', services:'Services', settings:'Settings', orders:'Orders', logs:'Logs', stockLogs:'StockLogs', customers:'Customers', promotions:'Promotions', promotionProducts:'PromotionProducts', system:'System', trash:'Trash', wikiCache:'WikiCache', customerInteractions:'CustomerInteractions', reportSettings:'ReportSettings', users:'Users', sessions:'Sessions', backups:'Backups', notifications:'Notifications' };
+const SHEETS = { seals:'Seals', items:'Items', services:'Services', settings:'Settings', orders:'Orders', logs:'Logs', stockLogs:'StockLogs', customers:'Customers', promotions:'Promotions', promotionProducts:'PromotionProducts', system:'System', trash:'Trash', wikiCache:'WikiCache', customerInteractions:'CustomerInteractions', reportSettings:'ReportSettings', users:'Users', sessions:'Sessions', backups:'Backups', notifications:'Notifications', orderItems:'OrderItems', orderRequests:'OrderRequests' };
 const HEADERS = {
   seals:['id','name','aliases','category','section','price','unit','packSize','status','stock','note','imageUrl','wikiName','badge','sortOrder','updatedAt','reservedStock','lowStockAlert','costPrice','wikiTitle','wikiUrl','wikiImageSource','tags','searchKeywords','wikiSyncedAt'],
   items:['id','name','aliases','itemCategory','price','unit','status','stock','note','description','imageUrl','badge','sortOrder','updatedAt','reservedStock','lowStockAlert','costPrice','tags','searchKeywords'],
   services:['id','name','aliases','serviceCategory','price','unit','status','stock','note','description','imageUrl','badge','sortOrder','updatedAt','tags','searchKeywords'],
   settings:['key','value','description'],
-  orders:['orderId','createdAt','tamer','server','contact','itemsJson','total','promoSets','status','adminNote','updatedAt'],
+  orders:['orderId','createdAt','tamer','server','contact','itemsJson','total','promoSets','status','adminNote','updatedAt','requestId','pricingJson','inventoryState','deletedAt','deletedBy','deleteReason','legacyOrder'],
   logs:['createdAt','action','kind','id','name','details'],
   stockLogs:['createdAt','kind','productId','productName','beforeStock','changeQty','afterStock','reservedStock','availableStock','action','reason','admin'],
   customers:['customerId','createdAt','updatedAt','tamer','server','contact','orderCount','totalSpent','vipLevel','status','note','lastOrderAt','tags','preferredContact','followUpAt','lastContactAt'],
@@ -21,70 +21,94 @@ const HEADERS = {
   wikiCache:['cachedAt','query','title','url','thumbnail','extract'],
   customerInteractions:['interactionId','createdAt','customerId','customerName','type','channel','note','nextFollowUpAt','admin'],
   reportSettings:['key','value','description'],
-  users:['userId','displayName','passwordHash','role','status','createdAt','updatedAt','lastLoginAt'],
+  users:['userId','displayName','passwordHash','role','status','createdAt','updatedAt','lastLoginAt','passwordSalt','passwordAlgo','mustChangePassword','failedLoginCount','lockedUntil'],
   sessions:['token','userId','role','createdAt','expiresAt','lastSeenAt','status'],
   backups:['backupId','createdAt','createdBy','reason','fileId','fileUrl','fileName','sizeBytes','status'],
-  notifications:['notificationId','createdAt','type','severity','title','message','status','relatedId']
+  notifications:['notificationId','createdAt','type','severity','title','message','status','relatedId'],
+  orderItems:['orderItemId','orderId','kind','productId','productName','quantity','unit','unitPrice','lineTotal','pickStatus','stockCheck','createdAt','updatedAt'],
+  orderRequests:['requestId','createdAt','orderId','contactHash','status','responseJson']
 };
 const DEFAULT_SETTINGS = {
-  shopName:'DMO Toolbox', promoThreshold:100, promoReward:150,
+  shopName:'GUN SHOP DMO', ownerName:'Natthananat Kawinwatthanakorn', promoThreshold:100, promoReward:150,
   orderNotice:'รายการนี้ยังไม่ใช่การยืนยันคำสั่งซื้อ กรุณารอร้านตรวจสอบสต๊อกและยืนยันยอดก่อนโอน',
   autoRefreshSeconds:60, allowOrderSave:'TRUE', showStock:'TRUE', facebookUrl:'', lineUrl:'',
   sessionDays:7, autoLockMinutes:30, apiKey:'',
   backupEnabled:'TRUE', backupHour:3, backupRetention:14, alertLowStock:'TRUE', alertNewOrders:'TRUE',
-  themeDefault:'DARK', enablePWA:'TRUE', offlineCacheHours:12, mobileCompact:'TRUE', showMobileBottomNav:'TRUE'
+  themeDefault:'DARK', enablePWA:'TRUE', offlineCacheHours:12, mobileCompact:'TRUE', showMobileBottomNav:'TRUE',
+  orderSuccessMessage:'ส่งรายการให้ทางร้านเรียบร้อยแล้ว ทางร้านจะตรวจสอบสต๊อกและจัดรายการให้', orderPrefix:'GUN'
 };
+
+const PUBLIC_PRODUCT_FIELDS=['id','kind','name','aliases','category','section','itemCategory','serviceCategory','description','price','unit','packSize','status','imageUrl','wikiName','badge','sortOrder','wikiTitle','wikiUrl','tags','searchKeywords'];
+const PUBLIC_SETTING_FIELDS=['shopName','ownerName','promoThreshold','promoReward','orderNotice','autoRefreshSeconds','allowOrderSave','showStock','facebookUrl','lineUrl','themeDefault','enablePWA','offlineCacheHours','mobileCompact','showMobileBottomNav','orderSuccessMessage'];
+const PUBLIC_PROMOTION_FIELDS=['promotionId','name','type','value','minSpend','buyQty','freeQty','rewardText','startAt','endAt','status','priority','stackable','scope'];
+const ORDER_TRANSITIONS={NEW:['CHECKING','CANCELLED'],CHECKING:['PREPARING','CANCELLED'],PREPARING:['READY','CANCELLED'],READY:['COMPLETED','CANCELLED'],COMPLETED:[],CANCELLED:[]};
+const PASSWORD_ALGO='ITERATED-HMAC-SHA256-6000';
+const KNOWN_INSECURE_OWNER_HASH='77acc467d71ca17d5a480aa17d8b0b05d536139a61c99a08d1573dd81eab7d03';
+const PUBLIC_CACHE_KEY='public-catalog-v20-1-perf-1';
+const PRODUCTION_SPREADSHEET_ID='1AXYpPnrBRQPYhdDYODV80S4UTz5-gLEXIO_Jn8Rt-sM';
+const TEST_SPREADSHEET_ID='1WPtJgFe7jswHafieD7zJ19pjSxrdFZACT4iLCi_PfLM';
+const PUBLIC_CACHE_MUTATIONS=['createOrder','upsert','delete','softDelete','restoreTrash','permanentDelete','bulkUpdate','saveSettings','adjustStock','setStock','upsertPromotion','deletePromotion','updateOrder'];
 
 function doGet(e){
   try {
-    ensureDatabase();
-    const isAdmin=e&&e.parameter&&e.parameter.admin==='1'&&validToken(e.parameter.token);
-    const data=readAll(isAdmin);
-    if(isAdmin){const actor=currentActor(e.parameter.token);data.security={actor,users:actor&&actor.role==='OWNER'?listUsers():[],sessionDays:settingValue('sessionDays',7),autoLockMinutes:settingValue('autoLockMinutes',30),apiKeyConfigured:!!String(settingValue('apiKey',''))};data.automation=getAutomationData(actor);}
-    return output({ok:true,...data,updatedAt:new Date().toISOString()});
-  } catch(err){ return output({ok:false,error:String(err&&err.message||err)}); }
+    return output({ok:true,...readPublic(),updatedAt:new Date().toISOString()});
+  } catch(err){ return publicFailure(err); }
 }
 
 function doPost(e){
+  let publicAction=false;
   try {
-    ensureDatabase();
-    const body=JSON.parse((e.postData&&e.postData.contents)||'{}');
-    if(body.action==='login') return login(body);
-    if(body.action==='createOrder') return createOrder(body);
+    const rawBody=(e.postData&&e.postData.contents)||'{}';
+    if(rawBody.length>200000)throw Error('คำขอมีขนาดใหญ่เกินกำหนด');
+    const body=JSON.parse(rawBody);
+    if(PUBLIC_CACHE_MUTATIONS.includes(body.action))invalidatePublicCache();
+    publicAction=body.action==='login'||body.action==='createOrder';
+    if(body.action==='login'){ensureDatabase();return login(body);}
+    if(body.action==='createOrder'){ensureDatabase();return createOrder(body);}
     if(body.action==='logout') return logout(body.token);
-    if(!validToken(body.token)) throw Error('กรุณาเข้าสู่ระบบใหม่');
-    const actor=currentActor(body.token);
-    const writeActions=['upsert','delete','softDelete','restoreTrash','permanentDelete','bulkUpdate','saveSettings','updateOrder','uploadImage','importWikiImage','attachWikiMetadata','adjustStock','setStock','updateCustomer','addCustomerInteraction','upsertPromotion','deletePromotion','createBackup','restoreBackup','setupBackupTrigger','deleteBackup'];
-    if(writeActions.includes(body.action)) requireRole(body.token,['OWNER','ADMIN','STAFF']);
+    ensureDatabase();
+    const session=getSession(body.token,true);
+    if(!session) throw Error('กรุณาเข้าสู่ระบบใหม่');
+    const actor={userId:String(session.userId),role:String(session.role||'VIEWER')};
+    const adminWriteActions=['upsert','delete','softDelete','restoreTrash','permanentDelete','bulkUpdate','saveSettings','uploadImage','importWikiImage','attachWikiMetadata','upsertPromotion','deletePromotion','createBackup','restoreBackup','setupBackupTrigger','deleteBackup','saveSecurityUser'];
+    const staffWriteActions=['updateOrder','updateOrderItemPick','adjustStock','setStock','updateCustomer','addCustomerInteraction'];
+    if(adminWriteActions.includes(body.action)) requireRole(body.token,['OWNER','ADMIN']);
+    if(staffWriteActions.includes(body.action)) requireRole(body.token,['OWNER','ADMIN','STAFF']);
     switch(body.action){
-      case'upsert': return upsert(body.record);
-      case'delete': return softDelete(body.kind,body.id);
-      case'softDelete': return softDelete(body.kind,body.id);
-      case'restoreTrash': return restoreTrash(body.trashId);
-      case'permanentDelete': return permanentDelete(body.trashId);
-      case'bulkUpdate': return bulkUpdate(body.records,body.changes);
-      case'saveSettings': return saveSettings(body.settings);
-      case'updateOrder': return updateOrder(body);
+      case'getAdminData': return output({ok:true,...readAdmin(actor)});
+      case'upsert': return upsert(body.record,actor.userId);
+      case'delete': return softDelete(body.kind,body.id,actor.userId);
+      case'softDelete': return softDelete(body.kind,body.id,actor.userId);
+      case'restoreTrash': return restoreTrash(body.trashId,actor.userId);
+      case'permanentDelete': return permanentDelete(body.trashId,actor.userId);
+      case'bulkUpdate': return bulkUpdate(body.records,body.changes,actor.userId);
+      case'saveSettings': requireRole(body.token,['OWNER','ADMIN']);return saveSettings(body.settings,actor.userId);
+      case'updateOrder': return updateOrder(body,actor.userId);
+      case'updateOrderItemPick': return updateOrderItemPick(body,actor.userId);
+      case'archiveOrder': requireRole(body.token,['OWNER','ADMIN']);return archiveOrder(body,actor.userId);
+      case'restoreArchivedOrder': requireRole(body.token,['OWNER','ADMIN']);return restoreArchivedOrder(body,actor.userId);
       case'uploadImage': return uploadImage(body);
       case'wikiGallery': return output({ok:true,images:getWikiSealImages()});
       case'importWikiImage': return importWikiImage(body);
       case'wikiSearchPages': return output({ok:true,results:searchDmoWikiPages(body.query)});
       case'attachWikiMetadata': return attachWikiMetadata(body);
-      case'adjustStock': return adjustStock(body);
-      case'setStock': return setStock(body);
+      case'adjustStock': return adjustStock(body,actor.userId);
+      case'setStock': return setStock(body,actor.userId);
       case'updateCustomer': return updateCustomer(body);
-      case'addCustomerInteraction': return addCustomerInteraction(body);
+      case'addCustomerInteraction': return addCustomerInteraction(body,actor.userId);
       case'upsertPromotion': return upsertPromotion(body.promotion);
       case'deletePromotion': return deletePromotion(body.promotionId);
       case'saveSecurityUser': return saveSecurityUser(body,actor);
+      case'changeOwnerPassword': return changeOwnerPassword(body,actor);
       case'createBackup': return createBackupAction(body,actor);
       case'restoreBackup': return restoreBackupAction(body,actor);
       case'setupBackupTrigger': return setupBackupTriggerAction(body,actor);
       case'deleteBackup': return deleteBackupAction(body,actor);
+      case'runIntegrityCheck': requireRole(body.token,['OWNER','ADMIN']);return output({ok:true,integrity:runIntegrityCheck()});
       case'initialize': return output({ok:true,message:'ฐานข้อมูลพร้อมใช้งาน'});
       default: throw Error('ไม่รู้จักคำสั่ง');
     }
-  } catch(err){ return output({ok:false,error:String(err&&err.message||err)}); }
+  } catch(err){ return publicAction?publicFailure(err):output({ok:false,error:safeAdminError(err)}); }
 }
 
 function ss(){ return SpreadsheetApp.getActiveSpreadsheet(); }
@@ -100,10 +124,13 @@ function sheet(name,headers){
   return s;
 }
 function ensureDatabase(){
+  const cache=CacheService.getScriptCache(),cacheKey='database-ready-3.1.0';
+  if(cache.get(cacheKey)==='TRUE')return;
   sheet(SHEETS.seals,HEADERS.seals); sheet(SHEETS.items,HEADERS.items); sheet(SHEETS.services,HEADERS.services);
-  sheet(SHEETS.settings,HEADERS.settings); sheet(SHEETS.orders,HEADERS.orders); sheet(SHEETS.logs,HEADERS.logs); sheet(SHEETS.stockLogs,HEADERS.stockLogs);
-  sheet(SHEETS.customers,HEADERS.customers); sheet(SHEETS.customerInteractions,HEADERS.customerInteractions); sheet(SHEETS.promotions,HEADERS.promotions); sheet(SHEETS.promotionProducts,HEADERS.promotionProducts); sheet(SHEETS.system,HEADERS.system); sheet(SHEETS.trash,HEADERS.trash); sheet(SHEETS.wikiCache,HEADERS.wikiCache); sheet(SHEETS.reportSettings,HEADERS.reportSettings); sheet(SHEETS.users,HEADERS.users); sheet(SHEETS.sessions,HEADERS.sessions); sheet(SHEETS.backups,HEADERS.backups); sheet(SHEETS.notifications,HEADERS.notifications);
+  sheet(SHEETS.settings,HEADERS.settings); sheet(SHEETS.orders,HEADERS.orders); sheet(SHEETS.orderRequests,HEADERS.orderRequests); sheet(SHEETS.logs,HEADERS.logs); sheet(SHEETS.stockLogs,HEADERS.stockLogs);
+  sheet(SHEETS.customers,HEADERS.customers); sheet(SHEETS.customerInteractions,HEADERS.customerInteractions); sheet(SHEETS.promotions,HEADERS.promotions); sheet(SHEETS.promotionProducts,HEADERS.promotionProducts); sheet(SHEETS.system,HEADERS.system); sheet(SHEETS.trash,HEADERS.trash); sheet(SHEETS.wikiCache,HEADERS.wikiCache); sheet(SHEETS.reportSettings,HEADERS.reportSettings); sheet(SHEETS.users,HEADERS.users); sheet(SHEETS.sessions,HEADERS.sessions); sheet(SHEETS.backups,HEADERS.backups); sheet(SHEETS.notifications,HEADERS.notifications); sheet(SHEETS.orderItems,HEADERS.orderItems);
   seedSettings(); seedSystem(); seedDefaultPromotions(); seedSecurity(); migrateLegacy();
+  cache.put(cacheKey,'TRUE',300);
 }
 function seedSettings(){
   const s=sheet(SHEETS.settings,HEADERS.settings), values=s.getDataRange().getValues(), keys=new Set(values.slice(1).map(r=>String(r[0])));
@@ -113,9 +140,9 @@ function seedSettings(){
 function seedSystem(){
   const s=sheet(SHEETS.system,HEADERS.system),values=s.getDataRange().getValues(),map={};
   values.slice(1).forEach(r=>map[String(r[0])]=r[1]);
-  if(!map.databaseVersion)s.appendRow(['databaseVersion','2.1.0','ฐานถาวรสำหรับ DMO Toolbox Ultimate']);
-  else setSystemValue('databaseVersion','2.1.0','V19 Mobile, PWA & Performance');
-  if(!map.appFamily)s.appendRow(['appFamily','DMO Toolbox Ultimate','ชื่อชุดระบบ']);
+  if(!map.databaseVersion)s.appendRow(['databaseVersion','3.1.0','GUN SHOP DMO V20.1 Stability & Security Final']);
+  else setSystemValue('databaseVersion','3.1.0','GUN SHOP DMO V20.1 Stability & Security Final');
+  if(!map.appFamily)s.appendRow(['appFamily','GUN SHOP DMO','ชื่อชุดระบบ']); else setSystemValue('appFamily','GUN SHOP DMO','ชื่อชุดระบบ');
   if(!map.installedAt)s.appendRow(['installedAt',new Date(),'วันที่ติดตั้งครั้งแรก']);
   setSystemValue('lastMigrationAt',new Date(),'วันที่ปรับโครงสร้างล่าสุด');
 }
@@ -137,10 +164,28 @@ function settingValue(key, fallback){
   const list=rows(SHEETS.settings),found=list.find(x=>String(x.key)===String(key));
   return found ? smart(found.value) : fallback;
 }
+function randomSalt(){return Utilities.getUuid().replace(/-/g,'')+Utilities.getUuid().replace(/-/g,'');}
+function bytesToHex(bytes){return bytes.map(b=>('0'+((b<0?b+256:b).toString(16))).slice(-2)).join('');}
+function passwordHashV2(password,salt){
+  let value=Utilities.newBlob(String(salt)+'\u0000'+String(password||'')).getBytes();
+  const key=Utilities.newBlob(String(password||'')).getBytes();
+  for(let i=0;i<6000;i++)value=Utilities.computeHmacSha256Signature(value,key);
+  return bytesToHex(value);
+}
+function securePasswordRecord(password){const salt=randomSalt();return{salt,hash:passwordHashV2(password,salt),algo:PASSWORD_ALGO};}
+function passwordMatches(password,stored,salt,algo){return String(algo||'')===PASSWORD_ALGO&&salt?passwordHashV2(password,salt)===String(stored||''):sha256(password)===String(stored||'');}
+function environmentInfo(){const id=ss().getId();return{environment:id===PRODUCTION_SPREADSHEET_ID?'PRODUCTION':id===TEST_SPREADSHEET_ID?'TEST':'BACKUP',ownerSetupAllowed:id===PRODUCTION_SPREADSHEET_ID||id===TEST_SPREADSHEET_ID};}
 function seedSecurity(){
-  const u=sheet(SHEETS.users,HEADERS.users);
-  if(u.getLastRow()===1){const now=new Date();u.appendRow(['181','Owner',sha256('6395'),'OWNER','ACTIVE',now,now,'']);}
-  setSystemValue('securityVersion','1.0','V17 Security');
+  const u=sheet(SHEETS.users,HEADERS.users),v=u.getDataRange().getValues(),h=v[0].map(String),now=new Date();
+  for(let i=1;i<v.length;i++){
+    const hash=String(v[i][h.indexOf('passwordHash')]||''),status=String(v[i][h.indexOf('status')]||'ACTIVE');
+    if(hash===KNOWN_INSECURE_OWNER_HASH&&status==='ACTIVE'){
+      u.getRange(i+1,h.indexOf('status')+1).setValue('RESET_REQUIRED');
+      u.getRange(i+1,h.indexOf('mustChangePassword')+1).setValue('TRUE');
+      u.getRange(i+1,h.indexOf('updatedAt')+1).setValue(now);
+    }
+  }
+  setSystemValue('securityVersion','2.0','V20.1 salted password storage and throttling');
 }
 function cleanupSessions(){
   const s=sheet(SHEETS.sessions,HEADERS.sessions),v=s.getDataRange().getValues();if(v.length<2)return;
@@ -158,19 +203,30 @@ function getSession(token,touch){
 function validToken(token){return !!getSession(token,true);}
 function currentActor(token){const s=getSession(token,false);return s?{userId:String(s.userId),role:String(s.role||'VIEWER')}:null;}
 function requireRole(token,allowed){const a=currentActor(token);if(!a)throw Error('กรุณาเข้าสู่ระบบใหม่');if(!allowed.includes(a.role))throw Error('บัญชีนี้ไม่มีสิทธิ์ทำรายการนี้');return a;}
+function loginThrottleKey(id){return'login-'+sha256(String(id||'').toLowerCase()).slice(0,32);}
+function registerUnknownLoginFailure(id){const c=CacheService.getScriptCache(),k=loginThrottleKey(id),n=number(c.get(k))+1;c.put(k,String(n),900);if(n>=6)throw Error('ลองเข้าสู่ระบบหลายครั้งเกินไป กรุณารอ 15 นาที');}
 function login(b){
-  const u=sheet(SHEETS.users,HEADERS.users),v=u.getDataRange().getValues(),h=v[0].map(String),id=String(b.adminId||'').trim(),hash=sha256(b.password||'');
-  for(let i=1;i<v.length;i++)if(String(v[i][h.indexOf('userId')])===id&&String(v[i][h.indexOf('status')])==='ACTIVE'){
-    if(String(v[i][h.indexOf('passwordHash')])!==hash){securityLog('LOGIN_FAILED',id,'รหัสผ่านไม่ถูกต้อง');throw Error('ไอดีหรือรหัสผ่านไม่ถูกต้อง');}
-    const token=Utilities.getUuid()+Utilities.getUuid(),days=Math.max(1,Math.min(30,Number(settingValue('sessionDays',7))||7)),now=new Date(),expires=new Date(now.getTime()+days*86400000),role=String(v[i][h.indexOf('role')]||'VIEWER');
-    sheet(SHEETS.sessions,HEADERS.sessions).appendRow([token,id,role,now,expires,now,'ACTIVE']);u.getRange(i+1,h.indexOf('lastLoginAt')+1).setValue(now);cleanupSessions();securityLog('LOGIN_SUCCESS',id,role);
-    return output({ok:true,token,user:{userId:id,displayName:String(v[i][h.indexOf('displayName')]||id),role},expiresAt:expires});
-  }securityLog('LOGIN_FAILED',id,'ไม่พบบัญชี');throw Error('ไอดีหรือรหัสผ่านไม่ถูกต้อง');
+  const u=sheet(SHEETS.users,HEADERS.users),v=u.getDataRange().getValues(),h=v[0].map(String),id=String(b.adminId||'').trim(),password=String(b.password||''),now=new Date();
+  for(let i=1;i<v.length;i++)if(String(v[i][h.indexOf('userId')])===id){
+    const row=i+1,status=String(v[i][h.indexOf('status')]||'ACTIVE'),lockedAt=v[i][h.indexOf('lockedUntil')],lockedUntil=lockedAt?new Date(lockedAt):null;
+    if(status==='RESET_REQUIRED')throw Error('บัญชีนี้ต้องตั้งรหัสผ่านใหม่ในชีต Users ก่อนใช้งาน');
+    if(status!=='ACTIVE')throw Error('ไอดีหรือรหัสผ่านไม่ถูกต้อง');
+    if(lockedUntil&&lockedUntil.getTime()>Date.now())throw Error('บัญชีถูกล็อกชั่วคราว กรุณาลองใหม่ภายหลัง');
+    const algo=String(v[i][h.indexOf('passwordAlgo')]||''),salt=String(v[i][h.indexOf('passwordSalt')]||''),stored=String(v[i][h.indexOf('passwordHash')]||'');
+    const valid=passwordMatches(password,stored,salt,algo);
+    if(!valid){const count=number(v[i][h.indexOf('failedLoginCount')])+1;u.getRange(row,h.indexOf('failedLoginCount')+1).setValue(count);if(count>=5)u.getRange(row,h.indexOf('lockedUntil')+1).setValue(new Date(Date.now()+15*60000));securityLog('LOGIN_FAILED',id,'INVALID_CREDENTIALS');throw Error(count>=5?'บัญชีถูกล็อกชั่วคราว กรุณาลองใหม่ภายหลัง':'ไอดีหรือรหัสผ่านไม่ถูกต้อง');}
+    if(algo!==PASSWORD_ALGO){const rec=securePasswordRecord(password);u.getRange(row,h.indexOf('passwordHash')+1).setValue(rec.hash);u.getRange(row,h.indexOf('passwordSalt')+1).setValue(rec.salt);u.getRange(row,h.indexOf('passwordAlgo')+1).setValue(rec.algo);}
+    const token=Utilities.getUuid()+Utilities.getUuid(),days=Math.max(1,Math.min(30,Number(settingValue('sessionDays',7))||7)),expires=new Date(now.getTime()+days*86400000),role=String(v[i][h.indexOf('role')]||'VIEWER');
+    sheet(SHEETS.sessions,HEADERS.sessions).appendRow([token,id,role,now,expires,now,'ACTIVE']);[['lastLoginAt',now],['failedLoginCount',0],['lockedUntil','']].forEach(x=>u.getRange(row,h.indexOf(x[0])+1).setValue(x[1]));cleanupSessions();securityLog('LOGIN_SUCCESS',id,role);
+    return output({ok:true,token,user:{userId:id,displayName:String(v[i][h.indexOf('displayName')]||id),role,mustChangePassword:String(v[i][h.indexOf('mustChangePassword')]||'FALSE')==='TRUE'},expiresAt:expires});
+  }registerUnknownLoginFailure(id);securityLog('LOGIN_FAILED',id,'UNKNOWN_USER');throw Error('ไอดีหรือรหัสผ่านไม่ถูกต้อง');
 }
 function logout(token){const s=sheet(SHEETS.sessions,HEADERS.sessions),v=s.getDataRange().getValues(),h=v[0].map(String);for(let i=1;i<v.length;i++)if(String(v[i][0])===String(token)){s.getRange(i+1,h.indexOf('status')+1).setValue('LOGGED_OUT');break;}return output({ok:true});}
 function securityLog(action,userId,details){sheet(SHEETS.logs,HEADERS.logs).appendRow([new Date(),action,'SECURITY',userId||'','',details||'']);}
-function listUsers(){return rows(SHEETS.users).map(x=>({userId:x.userId,displayName:x.displayName,role:x.role,status:x.status,createdAt:x.createdAt,updatedAt:x.updatedAt,lastLoginAt:x.lastLoginAt}));}
-function saveSecurityUser(b,actor){return withLock(()=>{requireRole(b.token,['OWNER']);const p=b.user||{},id=String(p.userId||'').trim();if(!id)throw Error('กรุณากรอก User ID');const role=['OWNER','ADMIN','STAFF','VIEWER'].includes(p.role)?p.role:'VIEWER',s=sheet(SHEETS.users,HEADERS.users),v=s.getDataRange().getValues(),h=v[0].map(String),now=new Date();let row=-1;for(let i=1;i<v.length;i++)if(String(v[i][0])===id){row=i+1;break;}if(row<0){if(!p.password)throw Error('ผู้ใช้ใหม่ต้องกำหนดรหัสผ่าน');s.appendRow([id,p.displayName||id,sha256(p.password),role,p.status||'ACTIVE',now,now,'']);}else{const set=(k,val)=>{const c=h.indexOf(k);if(c>=0)s.getRange(row,c+1).setValue(val);};set('displayName',p.displayName||id);set('role',role);set('status',p.status||'ACTIVE');set('updatedAt',now);if(p.password)set('passwordHash',sha256(p.password));}securityLog('USER_SAVE',actor.userId,id+' '+role);return output({ok:true});});}
+function invalidateUserSessions(userId){const s=sheet(SHEETS.sessions,HEADERS.sessions),v=s.getDataRange().getValues();if(v.length<2)return 0;const h=v[0].map(String),uid=h.indexOf('userId'),status=h.indexOf('status');let count=0;for(let i=1;i<v.length;i++)if(String(v[i][uid])===String(userId)&&String(v[i][status])==='ACTIVE'){s.getRange(i+1,status+1).setValue('PASSWORD_CHANGED');count++;}return count;}
+function changeOwnerPassword(b,actor){return withLock(()=>{const verified=requireRole(b.token,['OWNER']);if(String(actor.userId)!==String(verified.userId))throw Error('ไม่สามารถยืนยันบัญชีผู้ใช้ได้');const current=String(b.currentPassword||''),next=String(b.newPassword||''),confirm=String(b.confirmPassword||'');if(!current)throw Error('กรุณากรอกรหัสผ่านปัจจุบัน');if(next.length<10)throw Error('รหัสผ่านใหม่ต้องมีอย่างน้อย 10 ตัวอักษร');if(next!==confirm)throw Error('รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน');if(current===next)throw Error('รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสผ่านปัจจุบัน');const s=sheet(SHEETS.users,HEADERS.users),v=s.getDataRange().getValues(),h=v[0].map(String),uid=h.indexOf('userId');let row=-1;for(let i=1;i<v.length;i++)if(String(v[i][uid])===String(actor.userId)){row=i+1;break;}if(row<0||String(v[row-1][h.indexOf('role')])!=='OWNER'||String(v[row-1][h.indexOf('status')])!=='ACTIVE')throw Error('ไม่พบบัญชี OWNER ที่พร้อมใช้งาน');if(!passwordMatches(current,v[row-1][h.indexOf('passwordHash')],v[row-1][h.indexOf('passwordSalt')],v[row-1][h.indexOf('passwordAlgo')])){securityLog('OWNER_PASSWORD_CHANGE_REJECTED',actor.userId,'INVALID_CURRENT_PASSWORD');throw Error('รหัสผ่านปัจจุบันไม่ถูกต้อง');}const rec=securePasswordRecord(next),set=(k,val)=>{const c=h.indexOf(k);if(c>=0)s.getRange(row,c+1).setValue(val);};set('passwordHash',rec.hash);set('passwordSalt',rec.salt);set('passwordAlgo',rec.algo);set('mustChangePassword','FALSE');set('failedLoginCount',0);set('lockedUntil','');set('updatedAt',new Date());const revoked=invalidateUserSessions(actor.userId);securityLog('OWNER_PASSWORD_CHANGED',actor.userId,'SESSIONS_REVOKED='+revoked);return output({ok:true,message:'เปลี่ยนรหัสผ่านสำเร็จ กรุณาเข้าสู่ระบบอีกครั้ง'});});}
+function listUsers(source){return (source||rows(SHEETS.users)).map(x=>({userId:x.userId,displayName:x.displayName,role:x.role,status:x.status,createdAt:x.createdAt,updatedAt:x.updatedAt,lastLoginAt:x.lastLoginAt}));}
+function saveSecurityUser(b,actor){return withLock(()=>{requireRole(b.token,['OWNER']);const p=b.user||{},id=String(p.userId||'').trim();if(!id)throw Error('กรุณากรอก User ID');if(p.password&&String(p.password).length<10)throw Error('รหัสผ่านต้องมีอย่างน้อย 10 ตัวอักษร');const role=['OWNER','ADMIN','STAFF','VIEWER'].includes(p.role)?p.role:'VIEWER',s=sheet(SHEETS.users,HEADERS.users),v=s.getDataRange().getValues(),h=v[0].map(String),now=new Date();let row=-1;for(let i=1;i<v.length;i++)if(String(v[i][0])===id){row=i+1;break;}const rec=p.password?securePasswordRecord(p.password):null;if(row<0){if(!rec)throw Error('ผู้ใช้ใหม่ต้องกำหนดรหัสผ่าน');const data={userId:id,displayName:p.displayName||id,passwordHash:rec.hash,role,status:p.status||'ACTIVE',createdAt:now,updatedAt:now,lastLoginAt:'',passwordSalt:rec.salt,passwordAlgo:rec.algo,mustChangePassword:'FALSE',failedLoginCount:0,lockedUntil:''};s.appendRow(HEADERS.users.map(k=>data[k]??''));}else{const set=(k,val)=>{const c=h.indexOf(k);if(c>=0)s.getRange(row,c+1).setValue(val);};set('displayName',p.displayName||id);set('role',role);set('status',p.status||'ACTIVE');set('updatedAt',now);if(rec){set('passwordHash',rec.hash);set('passwordSalt',rec.salt);set('passwordAlgo',rec.algo);set('mustChangePassword','FALSE');set('failedLoginCount',0);set('lockedUntil','');}}securityLog('USER_SAVE',actor.userId,id+' '+role);return output({ok:true});});}
 function migrateLegacy(){
   const target=sheet(SHEETS.seals,HEADERS.seals); if(target.getLastRow()>1)return;
   const legacy=ss().getSheetByName('Prices'); if(legacy&&legacy.getLastRow()>1){migrateRowsFromSheet(legacy,'PRICES');return;}
@@ -189,19 +245,39 @@ function readSheetFlexible(s){
   const vals=s.getDataRange().getDisplayValues(); let headerRow=0;
   for(let i=0;i<Math.min(vals.length,5);i++){if(vals[i].map(String).includes('id')&&vals[i].map(String).includes('name')){headerRow=i;break;}}
   const h=vals[headerRow].map(x=>String(x).trim());
-  return vals.slice(headerRow+1).map(r=>{const o={};h.forEach((k,i)=>{if(k)o[k]=r[i];});return o;}).filter(o=>o.id||o.name||o.key||o.orderId);
+  return vals.slice(headerRow+1).map(r=>{const o={};h.forEach((k,i)=>{if(k)o[k]=r[i];});return o;}).filter(o=>Object.keys(o).some(k=>String(o[k]??'').trim()!==''));
 }
 function rows(name){
   const key=Object.keys(SHEETS).find(k=>SHEETS[k]===name);
   return readSheetFlexible(sheet(name,HEADERS[key]||[]));
 }
-function readAll(admin){
-  const seals=rows(SHEETS.seals).map(normalizeSeal),gameItems=rows(SHEETS.items).map(normalizeItem),services=rows(SHEETS.services).map(normalizeService);
-  const settings={}; rows(SHEETS.settings).forEach(x=>settings[x.key]=smart(x.value));
-  const promotions=rows(SHEETS.promotions).map(normalizePromotion).filter(p=>p.status==='ACTIVE');
-  const data={seals,gameItems,services,settings,promotions};
-  if(admin){data.orders=rows(SHEETS.orders).slice().reverse().slice(0,500);data.logs=rows(SHEETS.logs).slice().reverse().slice(0,300);data.stockLogs=rows(SHEETS.stockLogs).slice().reverse().slice(0,500);data.customers=rows(SHEETS.customers).slice().reverse().slice(0,1500);data.customerInteractions=rows(SHEETS.customerInteractions).slice().reverse().slice(0,3000);data.promotions=rows(SHEETS.promotions).map(normalizePromotion);data.trash=rows(SHEETS.trash).slice().reverse().slice(0,1000);data.databaseVersion=getSystemValue('databaseVersion')||'1.6.0';}
-  return data;
+function rowsTail(name,limit){
+  const key=Object.keys(SHEETS).find(k=>SHEETS[k]===name),s=sheet(name,HEADERS[key]||[]),lastRow=s.getLastRow(),lastCol=s.getLastColumn();
+  if(lastRow<2||lastCol<1)return[];
+  const h=s.getRange(1,1,1,lastCol).getDisplayValues()[0].map(x=>String(x).trim()),start=Math.max(2,lastRow-Math.max(1,number(limit))+1),vals=s.getRange(start,1,lastRow-start+1,lastCol).getDisplayValues();
+  return vals.map(r=>{const o={};h.forEach((k,i)=>{if(k)o[k]=r[i];});return o;}).filter(o=>Object.keys(o).some(k=>String(o[k]??'').trim()!==''));
+}
+function existingRows(name){const s=ss().getSheetByName(name);return s?readSheetFlexible(s):[];}
+function pickFields(source,fields){const out={};fields.forEach(k=>{if(source[k]!==undefined)out[k]=source[k];});return out;}
+function publicProduct(product){const out=pickFields(product,PUBLIC_PRODUCT_FIELDS);out.availableStock=availableQty(product.stock,product.reservedStock);Object.keys(out).forEach(k=>{if(out[k]===undefined||out[k]===null||out[k]===''||(Array.isArray(out[k])&&!out[k].length))delete out[k];});return out;}
+function publicSettings(){const all={};existingRows(SHEETS.settings).forEach(x=>{if(PUBLIC_SETTING_FIELDS.includes(String(x.key)))all[x.key]=smart(x.value);});return all;}
+function publicPromotion(p){return pickFields(p,PUBLIC_PROMOTION_FIELDS);}
+function invalidatePublicCache(){const cache=CacheService.getScriptCache(),meta=Number(cache.get(PUBLIC_CACHE_KEY+'-count')||0),keys=[PUBLIC_CACHE_KEY+'-count'];for(let i=0;i<meta;i++)keys.push(PUBLIC_CACHE_KEY+'-'+i);cache.removeAll(keys);}
+function getCachedPublic(){const cache=CacheService.getScriptCache(),count=Number(cache.get(PUBLIC_CACHE_KEY+'-count')||0);if(!count)return null;let json='';for(let i=0;i<count;i++){const part=cache.get(PUBLIC_CACHE_KEY+'-'+i);if(part===null)return null;json+=part;}try{return JSON.parse(json);}catch(e){return null;}}
+function putCachedPublic(data){const cache=CacheService.getScriptCache(),json=JSON.stringify(data),size=30000,count=Math.ceil(json.length/size),entries={};entries[PUBLIC_CACHE_KEY+'-count']=String(count);for(let i=0;i<count;i++)entries[PUBLIC_CACHE_KEY+'-'+i]=json.slice(i*size,(i+1)*size);cache.putAll(entries,20);}
+function readPublic(){
+  const cached=getCachedPublic();if(cached)return cached;
+  const seals=existingRows(SHEETS.seals).filter(x=>x.id&&x.name).map(normalizeSeal).filter(x=>!['HIDDEN','INACTIVE'].includes(String(x.status))).map(publicProduct);
+  const gameItems=existingRows(SHEETS.items).filter(x=>x.id&&x.name).map(normalizeItem).filter(x=>!['HIDDEN','INACTIVE'].includes(String(x.status))).map(publicProduct);
+  const services=existingRows(SHEETS.services).filter(x=>x.id&&x.name).map(normalizeService).filter(x=>!['HIDDEN','INACTIVE'].includes(String(x.status))).map(publicProduct);
+  const promotions=existingRows(SHEETS.promotions).filter(x=>x.promotionId&&x.name).map(normalizePromotion).filter(p=>p.status==='ACTIVE').map(publicPromotion);
+  const result={seals,gameItems,services,settings:publicSettings(),promotions};putCachedPublic(result);return result;
+}
+function readAdmin(actor){
+  const seals=rows(SHEETS.seals).filter(x=>x.id&&x.name).map(normalizeSeal),gameItems=rows(SHEETS.items).filter(x=>x.id&&x.name).map(normalizeItem),services=rows(SHEETS.services).filter(x=>x.id&&x.name).map(normalizeService),settingRows=rows(SHEETS.settings),settings={};settingRows.forEach(x=>{if(String(x.key)!=='apiKey'||(actor&&['OWNER','ADMIN'].includes(actor.role)))settings[x.key]=smart(x.value);});
+  const orders=rows(SHEETS.orders),reversedOrders=orders.slice().reverse(),customers=rows(SHEETS.customers),users=actor&&actor.role==='OWNER'?rows(SHEETS.users):[],systemRows=rows(SHEETS.system),setting=(key,fallback)=>Object.prototype.hasOwnProperty.call(settings,key)?settings[key]:fallback;
+  const actorUser=actor?rows(SHEETS.users).find(x=>String(x.userId)===String(actor.userId)):null,environment=environmentInfo();
+  return{seals,gameItems,services,settings,orders:reversedOrders.filter(x=>!x.deletedAt).slice(0,500),deletedOrders:actor&&['OWNER','ADMIN'].includes(actor.role)?reversedOrders.filter(x=>!!x.deletedAt).slice(0,500):[],orderItems:rowsTail(SHEETS.orderItems,5000).reverse(),logs:rowsTail(SHEETS.logs,300).reverse(),stockLogs:rowsTail(SHEETS.stockLogs,500).reverse(),customers:customers.slice().reverse().slice(0,1500),customerInteractions:rowsTail(SHEETS.customerInteractions,3000).reverse(),promotions:rows(SHEETS.promotions).map(normalizePromotion),trash:rowsTail(SHEETS.trash,1000).reverse(),databaseVersion:(systemRows.find(x=>String(x.key)==='databaseVersion')||{}).value||'3.1.0',security:{actor,account:actorUser?{userId:actorUser.userId,displayName:actorUser.displayName,role:actorUser.role,status:actorUser.status}:null,environment:environment.environment,users:listUsers(users),sessionDays:setting('sessionDays',7),autoLockMinutes:setting('autoLockMinutes',30),apiKeyConfigured:!!String(setting('apiKey',''))},automation:getAutomationData(actor,{seals,gameItems,orders:orders.filter(x=>!x.deletedAt),customers,settings})};
 }
 function normalizeSeal(x){return{...x,kind:'SEAL',price:number(x.price),packSize:number(x.packSize)||1,stock:x.stock===''?'':number(x.stock),reservedStock:number(x.reservedStock),lowStockAlert:number(x.lowStockAlert),costPrice:x.costPrice===''?'':number(x.costPrice),sortOrder:number(x.sortOrder),aliases:splitAliases(x.aliases)};}
 function normalizeItem(x){return{...x,kind:'ITEM',price:number(x.price),stock:x.stock===''?'':number(x.stock),reservedStock:number(x.reservedStock),lowStockAlert:number(x.lowStockAlert),costPrice:x.costPrice===''?'':number(x.costPrice),sortOrder:number(x.sortOrder),aliases:splitAliases(x.aliases)};}
@@ -211,13 +287,13 @@ function getSystemValue(key){const all=rows(SHEETS.system);const hit=all.find(x=
 function splitAliases(v){return String(v||'').split('|').map(x=>x.trim()).filter(Boolean);}
 function smart(v){if(v==='TRUE')return true;if(v==='FALSE')return false;if(v!==''&&isFinite(Number(v)))return Number(v);return v;}
 function makeId(kind){return kind+'-'+Utilities.formatDate(new Date(),Session.getScriptTimeZone(),'yyyyMMddHHmmss')+'-'+Math.floor(Math.random()*9000+1000);}
-function withLock(fn){const lock=LockService.getScriptLock();lock.waitLock(15000);try{return fn();}finally{lock.releaseLock();}}
+function withLock(fn){const lock=LockService.getScriptLock();lock.waitLock(120000);try{return fn();}finally{lock.releaseLock();}}
 function catalogInfo(kind){
   if(kind==='SEAL')return{name:SHEETS.seals,headers:HEADERS.seals};
   if(kind==='SERVICE')return{name:SHEETS.services,headers:HEADERS.services};
   return{name:SHEETS.items,headers:HEADERS.items};
 }
-function upsert(record){return withLock(()=>{
+function upsert(record,actor){return withLock(()=>{
   if(!record||!record.name)throw Error('กรุณากรอกชื่อสินค้า');
   const info=catalogInfo(record.kind),s=sheet(info.name,info.headers),headers=info.headers;
   record.id=record.id||makeId(record.kind||'ITEM'); record.updatedAt=new Date();
@@ -227,7 +303,7 @@ function upsert(record){return withLock(()=>{
   const row=headers.map(k=>k==='aliases'&&Array.isArray(record.aliases)?record.aliases.join('|'):(record[k]??''));
   if(rowIndex<0)s.appendRow(row);else s.getRange(rowIndex,1,1,headers.length).setValues([row]);
   sortCatalog(s,headers,record.kind);
-  log('UPSERT',record.kind,record.id,record.name,JSON.stringify({price:record.price,stock:record.stock,status:record.status}));
+  log('UPSERT',record.kind,record.id,record.name,JSON.stringify({price:record.price,stock:record.stock,status:record.status,actor:actor||'SYSTEM'}));
   return output({ok:true,id:record.id});
 });}
 
@@ -243,39 +319,39 @@ function stockStatus(stock,reserved,current){
   if(current==='HIDDEN'||current==='INACTIVE')return current;
   return'ACTIVE';
 }
-function writeStockLog(kind,product,before,delta,after,reserved,action,reason){
-  sheet(SHEETS.stockLogs,HEADERS.stockLogs).appendRow([new Date(),kind,product.id,product.name,before,delta,after,reserved,availableQty(after,reserved),action,reason||'',ADMIN_ID]);
+function writeStockLog(kind,product,before,delta,after,reserved,action,reason,actor){
+  sheet(SHEETS.stockLogs,HEADERS.stockLogs).appendRow([new Date(),kind,product.id,product.name,before,delta,after,reserved,availableQty(after,reserved),action,reason||'',actor||'SYSTEM']);
 }
-function adjustStock(b){return withLock(()=>{
+function adjustStock(b,actor){return withLock(()=>{
   if(!['SEAL','ITEM'].includes(String(b.kind)))throw Error('ปรับสต๊อกได้เฉพาะซีลและไอเทม');
   const found=findCatalogRecord(b.kind,b.id),h=found.headers,d=found.data;
   const before=d.stock===''?0:number(d.stock),delta=number(b.delta),after=Math.max(0,before+delta),reserved=number(d.reservedStock),status=stockStatus(after,reserved,d.status);
   found.s.getRange(found.row,h.indexOf('stock')+1).setValue(after);
   found.s.getRange(found.row,h.indexOf('status')+1).setValue(status);
   found.s.getRange(found.row,h.indexOf('updatedAt')+1).setValue(new Date());
-  writeStockLog(b.kind,d,before,after-before,after,reserved,delta>=0?'ADD':'REMOVE',b.reason||'');
+  writeStockLog(b.kind,d,before,after-before,after,reserved,delta>=0?'ADD':'REMOVE',b.reason||'',actor);
   log('STOCK_ADJUST',b.kind,d.id,d.name,JSON.stringify({before,delta:after-before,after,reserved,reason:b.reason||''}));
   return output({ok:true,stock:after,status});
 });}
-function setStock(b){return withLock(()=>{
+function setStock(b,actor){return withLock(()=>{
   if(!['SEAL','ITEM'].includes(String(b.kind)))throw Error('กำหนดสต๊อกได้เฉพาะซีลและไอเทม');
   const found=findCatalogRecord(b.kind,b.id),h=found.headers,d=found.data;
   const before=d.stock===''?'':number(d.stock),stock=b.stock===''?'':Math.max(0,number(b.stock)),reserved=Math.max(0,number(b.reservedStock)),low=Math.max(0,number(b.lowStockAlert)),status=stockStatus(stock,reserved,d.status);
   [['stock',stock],['reservedStock',reserved],['lowStockAlert',low],['status',status],['updatedAt',new Date()]].forEach(([key,value])=>found.s.getRange(found.row,h.indexOf(key)+1).setValue(value));
   const delta=stock===''?0:number(stock)-number(before);
-  writeStockLog(b.kind,d,before===''?0:before,delta,stock===''?0:stock,reserved,'SET',b.reason||'');
+  writeStockLog(b.kind,d,before===''?0:before,delta,stock===''?0:stock,reserved,'SET',b.reason||'',actor);
   log('STOCK_SET',b.kind,d.id,d.name,JSON.stringify({before,stock,reserved,lowStockAlert:low,reason:b.reason||''}));
   return output({ok:true,stock,reservedStock:reserved,lowStockAlert:low,status});
 });}
 
-function softDelete(kind,id){return withLock(()=>{
+function softDelete(kind,id,actor){return withLock(()=>{
   const found=findCatalogRecord(kind,id),d=found.data;
-  sheet(SHEETS.trash,HEADERS.trash).appendRow([new Date(),kind,id,d.name||'',JSON.stringify(d),ADMIN_ID]);
+  sheet(SHEETS.trash,HEADERS.trash).appendRow([new Date(),kind,id,d.name||'',JSON.stringify(d),actor||'SYSTEM']);
   found.s.deleteRow(found.row);
   log('TRASH',kind,id,d.name||'','ย้ายเข้าถังขยะ');
   return output({ok:true});
 });}
-function restoreTrash(trashId){return withLock(()=>{
+function restoreTrash(trashId,actor){return withLock(()=>{
   const s=sheet(SHEETS.trash,HEADERS.trash),values=s.getDataRange().getValues(),h=values[0].map(String),idc=h.indexOf('id');
   for(let i=1;i<values.length;i++)if(String(values[i][idc])===String(trashId)){
     const kind=String(values[i][h.indexOf('kind')]),data=JSON.parse(String(values[i][h.indexOf('dataJson')]||'{}')),info=catalogInfo(kind),target=sheet(info.name,info.headers);
@@ -286,12 +362,12 @@ function restoreTrash(trashId){return withLock(()=>{
   }
   throw Error('ไม่พบรายการในถังขยะ');
 });}
-function permanentDelete(trashId){return withLock(()=>{
+function permanentDelete(trashId,actor){return withLock(()=>{
   const s=sheet(SHEETS.trash,HEADERS.trash),values=s.getDataRange().getValues(),h=values[0].map(String),idc=h.indexOf('id');
   for(let i=1;i<values.length;i++)if(String(values[i][idc])===String(trashId)){const name=values[i][h.indexOf('name')],kind=values[i][h.indexOf('kind')];s.deleteRow(i+1);log('DELETE_FOREVER',kind,trashId,name||'','ลบถาวร');return output({ok:true});}
   throw Error('ไม่พบรายการในถังขยะ');
 });}
-function bulkUpdate(records,changes){return withLock(()=>{
+function bulkUpdate(records,changes,actor){return withLock(()=>{
   const list=Array.isArray(records)?records:[];if(!list.length)throw Error('ยังไม่ได้เลือกรายการ');
   const allowed=['status','category','section','itemCategory','serviceCategory','unit','packSize','price','sortOrder','lowStockAlert'];let updated=0;
   list.forEach(ref=>{
@@ -308,23 +384,73 @@ function sortCatalog(s,headers,kind){
   sort.push({column:headers.indexOf('sortOrder')+1,ascending:true},{column:headers.indexOf('name')+1,ascending:true});
   s.getRange(2,1,s.getLastRow()-1,s.getLastColumn()).sort(sort);
 }
-function saveSettings(settingsObj){return withLock(()=>{
-  const s=sheet(SHEETS.settings,HEADERS.settings);
-  Object.keys(settingsObj||{}).forEach(k=>{const values=s.getDataRange().getValues();let row=-1;for(let i=1;i<values.length;i++)if(String(values[i][0])===k){row=i+1;break;}if(row<0)s.appendRow([k,settingsObj[k],'']);else s.getRange(row,2).setValue(settingsObj[k]);});
-  log('SETTINGS','SYSTEM','','','');return output({ok:true});
+function saveSettings(settingsObj,actor){return withLock(()=>{
+  const s=sheet(SHEETS.settings,HEADERS.settings),values=s.getDataRange().getValues(),rowByKey=new Map();for(let i=1;i<values.length;i++)rowByKey.set(String(values[i][0]),i+1);
+  Object.keys(settingsObj||{}).forEach(k=>{const row=rowByKey.get(k);if(!row){s.appendRow([k,settingsObj[k],'']);rowByKey.set(k,s.getLastRow());}else s.getRange(row,2).setValue(settingsObj[k]);});
+  log('SETTINGS','SYSTEM','','',actor||'SYSTEM');return output({ok:true});
 });}
+function catalogSnapshot(){
+  const map=new Map();
+  [['SEAL',SHEETS.seals,HEADERS.seals],['ITEM',SHEETS.items,HEADERS.items],['SERVICE',SHEETS.services,HEADERS.services]].forEach(([kind,name,headers])=>{const s=sheet(name,headers),v=s.getDataRange().getValues(),h=v[0].map(String);for(let i=1;i<v.length;i++){const data=Object.fromEntries(h.map((k,j)=>[k,v[i][j]]));if(data.id)map.set(kind+'|'+data.id,{kind,s,row:i+1,headers:h,data});}});return map;
+}
+function promotionActive(p,now){const start=p.startAt?new Date(p.startAt).getTime():0,end=p.endAt?new Date(p.endAt).getTime():0;return String(p.status||'ACTIVE')==='ACTIVE'&&(!start||now>=start)&&(!end||now<=end);}
+function calculateServerPricing(items,promotions){
+  const subtotal=items.reduce((sum,x)=>sum+number(x.lineTotal),0),now=Date.now();let discount=0;const applied=[],active=promotions.filter(p=>promotionActive(p,now)).sort((a,b)=>number(a.priority||999)-number(b.priority||999));
+  for(const p of active){if(subtotal<number(p.minSpend))continue;let amount=0;if(p.type==='DISCOUNT_PERCENT'||p.type==='FLASH_SALE')amount=subtotal*Math.max(0,Math.min(100,number(p.value)))/100;else if(p.type==='DISCOUNT_AMOUNT')amount=Math.min(subtotal,Math.max(0,number(p.value)));if(amount>0){discount+=amount;applied.push({promotionId:p.promotionId,name:p.name,type:p.type,amount});}else if(p.type==='REWARD_PER_SPEND')applied.push({promotionId:p.promotionId,name:p.name,type:p.type,amount:0});if(String(p.stackable)==='FALSE')break;}
+  discount=Math.min(subtotal,discount);return{subtotal,discount,total:Math.max(0,subtotal-discount),applied};
+}
+function findRequest(requestId){return rows(SHEETS.orderRequests).find(x=>String(x.requestId)===String(requestId));}
+function uniqueOrderId(existing){for(let i=0;i<8;i++){const now=new Date(),suffix=Utilities.getUuid().replace(/-/g,'').slice(0,8).toUpperCase(),id='GUN-'+Utilities.formatDate(now,Session.getScriptTimeZone(),'yyyyMMdd-HHmmss')+'-'+suffix;if(!existing.has(id))return id;}throw Error('ไม่สามารถสร้างเลขออเดอร์ได้ กรุณาลองใหม่');}
+function deleteRowsByValue(s,column,value){const v=s.getDataRange().getValues();for(let i=v.length-1;i>=1;i--)if(String(v[i][column])===String(value))s.deleteRow(i+1);}
 function createOrder(b){return withLock(()=>{
   const settings={};rows(SHEETS.settings).forEach(x=>settings[x.key]=smart(x.value));if(settings.allowOrderSave===false)return output({ok:true,orderId:''});
-  const s=sheet(SHEETS.orders,HEADERS.orders),now=new Date(),id='DMO-'+Utilities.formatDate(now,Session.getScriptTimeZone(),'yyyyMMdd-HHmmss'),total=number(b.total),promo=Math.floor(total/(number(settings.promoThreshold)||100));
-  s.appendRow([id,now,b.customer&&b.customer.tamer||'',b.customer&&b.customer.server||'',b.customer&&b.customer.contact||'',JSON.stringify(b.items||[]),total,promo,'NEW','',now]);
-  upsertCustomerFromOrder(b.customer||{},total,now);
-  log('ORDER','ORDER',id,b.customer&&b.customer.tamer||'',JSON.stringify({total,promo}));return output({ok:true,orderId:id});
+  const customer=b.customer||{},requestId=String(b.requestId||'').trim();if(!requestId||requestId.length>120)throw Error('คำขอออเดอร์ไม่ถูกต้อง กรุณารีเฟรชหน้าเว็บ');
+  const prior=findRequest(requestId);if(prior&&prior.responseJson){const saved=JSON.parse(String(prior.responseJson));return output({...saved,duplicate:true});}
+  const customerText={tamer:safeSheetText(customer.tamer,120),server:safeSheetText(customer.server,120),contact:safeSheetText(customer.contact,250)};
+  if(!customerText.tamer.trim()||!customerText.server.trim()||!customerText.contact.trim())throw Error('กรุณากรอกข้อมูลลูกค้าให้ครบ');
+  if(CacheService.getScriptCache().get('order-contact-'+sha256(customer.contact).slice(0,24)))throw Error('มีการส่งออเดอร์ล่าสุดแล้ว กรุณารอสักครู่ก่อนส่งรายการใหม่');
+  const raw=Array.isArray(b.items)?b.items:[];if(!raw.length)throw Error('ไม่มีสินค้าในออเดอร์');if(raw.length>100)throw Error('รายการสินค้าเกินกำหนด');
+  const grouped=new Map();raw.forEach(x=>{const kind=String(x.kind||'').toUpperCase();if(!['SEAL','ITEM','SERVICE'].includes(kind))throw Error('ประเภทสินค้าไม่ถูกต้อง');const id=String(x.id||''),qty=Number(x.quantity);if(!id||id.length>160||!Number.isFinite(qty)||!Number.isInteger(qty)||qty<1||qty>9999)throw Error('จำนวนสินค้าไม่ถูกต้อง');const key=kind+'|'+id;grouped.set(key,(grouped.get(key)||0)+qty);});
+  const catalog=catalogSnapshot(),normalized=[];grouped.forEach((qty,key)=>{if(qty>9999)throw Error('จำนวนสินค้าเกินกำหนด');const found=catalog.get(key);if(!found)throw Error('ไม่พบสินค้าในฐานข้อมูล');const p=found.data,status=String(p.status||'ACTIVE');if(['OUT_OF_STOCK','INACTIVE','HIDDEN'].includes(status))throw Error(String(p.name)+' ไม่พร้อมขาย');const stock=p.stock===''?'':number(p.stock),reserved=Math.max(0,number(p.reservedStock)),available=stock===''?'':stock-reserved;if(found.kind!=='SERVICE'&&available!==''&&qty>available)throw Error('สต๊อก '+String(p.name)+' ไม่พอ (พร้อมขาย '+available+')');const price=Math.max(0,number(p.price)),unit=found.kind==='SEAL'?(String(p.section)==='SUSA'?'ใบ':'ชุด'):(p.unit||'');normalized.push({orderItemId:'OI-'+Utilities.getUuid(),kind:found.kind,productId:p.id,productName:p.name,quantity:qty,unit,unitPrice:price,lineTotal:price*qty,pickStatus:'UNCHECKED',stockCheck:available===''?'CHECK':'OK',_found:found,_stock:stock,_reserved:reserved});});
+  const pricing=calculateServerPricing(normalized,rows(SHEETS.promotions).map(normalizePromotion)),now=new Date(),existingIds=new Set(rows(SHEETS.orders).map(x=>String(x.orderId))),id=uniqueOrderId(existingIds),promo=Math.floor(pricing.total/(number(settings.promoThreshold)||100));
+  const orderSheet=sheet(SHEETS.orders,HEADERS.orders),itemSheet=sheet(SHEETS.orderItems,HEADERS.orderItems),requestSheet=sheet(SHEETS.orderRequests,HEADERS.orderRequests),stockSnapshots=[];let itemsWritten=false,orderWritten=false,requestWritten=false;
+  try{
+    normalized.forEach(x=>{if(x.kind==='SERVICE'||x._stock==='')return;const f=x._found,rc=f.headers.indexOf('reservedStock'),next=x._reserved+x.quantity;if(next>x._stock)throw Error('สต๊อกไม่พอสำหรับ '+x.productName);stockSnapshots.push({s:f.s,row:f.row,col:rc+1,value:x._reserved,item:x});f.s.getRange(f.row,rc+1).setValue(next);});
+    const publicItems=normalized.map(x=>({orderItemId:x.orderItemId,orderId:id,kind:x.kind,productId:x.productId,productName:x.productName,quantity:x.quantity,unit:x.unit,unitPrice:x.unitPrice,lineTotal:x.lineTotal,pickStatus:x.pickStatus,stockCheck:x.stockCheck}));
+    if(publicItems.length){itemSheet.getRange(itemSheet.getLastRow()+1,1,publicItems.length,HEADERS.orderItems.length).setValues(publicItems.map(x=>HEADERS.orderItems.map(k=>k==='createdAt'||k==='updatedAt'?now:(x[k]??''))));itemsWritten=true;}
+    const order={orderId:id,createdAt:now,tamer:customerText.tamer,server:customerText.server,contact:customerText.contact,itemsJson:JSON.stringify(publicItems),total:pricing.total,promoSets:promo,status:'NEW',adminNote:'',updatedAt:now,requestId,pricingJson:JSON.stringify(pricing),inventoryState:'RESERVED'};orderSheet.appendRow(HEADERS.orders.map(k=>order[k]??''));orderWritten=true;
+    const response={ok:true,orderId:id,total:pricing.total,subtotal:pricing.subtotal,discount:pricing.discount,promoSets:promo,promotions:pricing.applied};requestSheet.appendRow([requestId,now,id,sha256(customer.contact).slice(0,24),'COMPLETED',JSON.stringify(response)]);requestWritten=true;
+    try{ensureCustomerProfile(customerText,now);stockSnapshots.forEach(x=>writeStockLog(x.item.kind,{id:x.item.productId,name:x.item.productName},x.item._stock,0,x.item._stock,x.item._reserved+x.item.quantity,'ORDER_RESERVE','ORDER '+id,'SYSTEM'));log('ORDER','ORDER',id,customerText.tamer,JSON.stringify({total:pricing.total,promo,items:publicItems.length,requestId}));}catch(logErr){}
+    CacheService.getScriptCache().put('order-contact-'+sha256(customer.contact).slice(0,24),String(Date.now()),30);invalidatePublicCache();return output(response);
+  }catch(err){for(let i=stockSnapshots.length-1;i>=0;i--){try{const x=stockSnapshots[i];x.s.getRange(x.row,x.col).setValue(x.value);}catch(rollbackErr){}}try{if(itemsWritten)deleteRowsByValue(itemSheet,1,id);}catch(rollbackErr){}try{if(orderWritten)deleteRowsByValue(orderSheet,0,id);}catch(rollbackErr){}try{if(requestWritten)deleteRowsByValue(requestSheet,0,requestId);}catch(rollbackErr){}throw err;}
 });}
-function updateOrder(b){return withLock(()=>{
-  const s=sheet(SHEETS.orders,HEADERS.orders),values=s.getDataRange().getValues(),h=values[0].map(String),idc=h.indexOf('orderId');
-  for(let i=1;i<values.length;i++){if(String(values[i][idc])===String(b.orderId)){if(b.status!==undefined)s.getRange(i+1,h.indexOf('status')+1).setValue(b.status);if(b.adminNote!==undefined)s.getRange(i+1,h.indexOf('adminNote')+1).setValue(b.adminNote);s.getRange(i+1,h.indexOf('updatedAt')+1).setValue(new Date());log('ORDER_STATUS','ORDER',b.orderId,'',b.status||'');return output({ok:true});}}
-  throw Error('ไม่พบออเดอร์');
+function migrateLegacyOrderItems(){return withLock(()=>{
+  if(String(getSystemValue('databaseVersion'))!=='3.1.0')throw Error('Corrective migration requires database version 3.1.0');
+  const orderSheet=sheet(SHEETS.orders,HEADERS.orders),itemSheet=sheet(SHEETS.orderItems,HEADERS.orderItems),orderValues=orderSheet.getDataRange().getValues(),orderHeaders=orderValues[0].map(String),itemValues=itemSheet.getDataRange().getValues(),itemHeaders=itemValues[0].map(String),itemOrderCol=itemHeaders.indexOf('orderId'),legacyCol=orderHeaders.indexOf('legacyOrder');
+  const existingByOrder=new Set(itemValues.slice(1).map(r=>String(r[itemOrderCol]||'')).filter(Boolean)),planned=[],legacyRows=[];
+  for(let i=1;i<orderValues.length;i++){
+    const row=orderValues[i],order=Object.fromEntries(orderHeaders.map((key,index)=>[key,row[index]])),alreadyLegacy=String(order.legacyOrder).toUpperCase()==='TRUE';
+    if(alreadyLegacy){if(!existingByOrder.has(String(order.orderId)))throw Error('Legacy order missing OrderItems: '+order.orderId);continue;}
+    if(order.requestId||order.inventoryState||existingByOrder.has(String(order.orderId)))continue;
+    let items;try{items=JSON.parse(String(order.itemsJson||''));}catch(e){throw Error('Cannot parse itemsJson: '+order.orderId);}
+    if(!Array.isArray(items)||!items.length)throw Error('Legacy order has no items: '+order.orderId);
+    let subtotal=0;items.forEach((item,index)=>{const kind=String(item.kind||item.type||'').toUpperCase(),productId=String(item.productId||item.id||'').trim(),productName=String(item.productName||item.name||'').trim(),quantity=Number(item.quantity??item.qty),unitPrice=Number(item.unitPrice??item.price),unit=String(item.unit||'').trim();if(!['SEAL','ITEM','SERVICE'].includes(kind)||!productId||!productName||!Number.isFinite(quantity)||quantity<=0||!Number.isFinite(unitPrice)||unitPrice<0||!unit)throw Error('Invalid legacy item snapshot: '+order.orderId+' #'+(index+1));const lineTotal=quantity*unitPrice;subtotal+=lineTotal;planned.push({orderItemId:'LEGACY-'+order.orderId+'-'+String(index+1).padStart(2,'0'),orderId:String(order.orderId),kind,productId,productName,quantity,unit,unitPrice,lineTotal,pickStatus:'UNCHECKED',stockCheck:'LEGACY_NO_STOCK_ACTION',createdAt:order.createdAt,updatedAt:order.createdAt});});
+    if(Math.abs(Number(order.total)-subtotal)>0.01)throw Error('Legacy snapshot total mismatch: '+order.orderId);legacyRows.push(i);
+  }
+  if(!planned.length){return{ok:true,idempotent:true,orders:legacyRows.length,orderItems:0};}
+  if(legacyRows.length!==16||planned.length!==40||itemValues.length!==1)throw Error('Corrective migration safety count mismatch');
+  const ids=planned.map(x=>x.orderItemId);if(new Set(ids).size!==ids.length)throw Error('Duplicate legacy OrderItem ID');
+  const itemStart=itemSheet.getLastRow()+1,oldMarkers=orderValues.slice(1).map(r=>r[legacyCol]);
+  try{itemSheet.getRange(itemStart,1,planned.length,HEADERS.orderItems.length).setValues(planned.map(x=>HEADERS.orderItems.map(k=>x[k]??'')));const markers=orderValues.slice(1).map((r,index)=>[legacyRows.includes(index+1)?'TRUE':r[legacyCol]]);orderSheet.getRange(2,legacyCol+1,markers.length,1).setValues(markers);return{ok:true,orders:legacyRows.length,orderItems:planned.length,stockMutations:0};}catch(err){try{if(itemSheet.getLastRow()>=itemStart)itemSheet.deleteRows(itemStart,itemSheet.getLastRow()-itemStart+1);}catch(e){}try{orderSheet.getRange(2,legacyCol+1,oldMarkers.length,1).setValues(oldMarkers.map(x=>[x]));}catch(e){}throw err;}
 });}
+function orderItemsFor(orderId){return rows(SHEETS.orderItems).filter(x=>String(x.orderId)===String(orderId));}
+function updateOrderItemPick(b,actor){return withLock(()=>{const s=sheet(SHEETS.orderItems,HEADERS.orderItems),v=s.getDataRange().getValues(),h=v[0].map(String),idc=h.indexOf('orderItemId'),pc=h.indexOf('pickStatus'),uc=h.indexOf('updatedAt');for(let i=1;i<v.length;i++)if(String(v[i][idc])===String(b.orderItemId)){const status=String(b.pickStatus)==='PICKED'?'PICKED':'UNCHECKED';if(String(v[i][pc])===status)return output({ok:true,idempotent:true});const values=v[i].slice(pc,uc+1);values[0]=status;values[uc-pc]=new Date();s.getRange(i+1,pc+1,1,values.length).setValues([values]);try{log('ORDER_PICK','ORDER_ITEM',b.orderItemId,'',status+' • '+(actor||'SYSTEM'));}catch(e){}return output({ok:true});}throw Error('ไม่พบรายการจัดของ');});}
+function groupedOrderItems(items){const map=new Map();items.forEach(x=>{if(String(x.kind).toUpperCase()==='SERVICE')return;const key=String(x.kind).toUpperCase()+'|'+x.productId;const cur=map.get(key)||{kind:String(x.kind).toUpperCase(),productId:x.productId,productName:x.productName,quantity:0};cur.quantity+=number(x.quantity);map.set(key,cur);});return[...map.values()];}
+function applyInventoryTransition(items,newStatus,orderId,actor){const catalog=catalogSnapshot(),snapshots=[];try{groupedOrderItems(items).forEach(x=>{const f=catalog.get(x.kind+'|'+x.productId);if(!f)throw Error('ไม่พบสินค้า '+x.productName);const sc=f.headers.indexOf('stock'),rc=f.headers.indexOf('reservedStock'),stock=f.data.stock===''?'':number(f.data.stock),reserved=number(f.data.reservedStock),qty=number(x.quantity);if(stock==='')return;if(reserved<qty)throw Error('Reserved Stock ไม่พอสำหรับ '+x.productName);const nextStock=newStatus==='COMPLETED'?stock-qty:stock,nextReserved=reserved-qty;if(nextStock<0||nextReserved<0)throw Error('สต๊อกไม่ถูกต้องสำหรับ '+x.productName);snapshots.push({s:f.s,row:f.row,sc:sc+1,rc:rc+1,stock,reserved,item:x,nextStock,nextReserved});f.s.getRange(f.row,sc+1).setValue(nextStock);f.s.getRange(f.row,rc+1).setValue(nextReserved);});return{state:newStatus==='COMPLETED'?'DEDUCTED':'RELEASED',rollback:()=>snapshots.slice().reverse().forEach(x=>{x.s.getRange(x.row,x.sc).setValue(x.stock);x.s.getRange(x.row,x.rc).setValue(x.reserved);}),logs:()=>snapshots.forEach(x=>writeStockLog(x.item.kind,{id:x.item.productId,name:x.item.productName},x.stock,newStatus==='COMPLETED'?-x.item.quantity:0,x.nextStock,x.nextReserved,newStatus==='COMPLETED'?'ORDER_COMPLETE':'ORDER_CANCEL','ORDER '+orderId,actor))};}catch(err){snapshots.slice().reverse().forEach(x=>{try{x.s.getRange(x.row,x.sc).setValue(x.stock);x.s.getRange(x.row,x.rc).setValue(x.reserved);}catch(e){}});throw err;}}
+function updateOrder(b,actor){return withLock(()=>{const s=sheet(SHEETS.orders,HEADERS.orders),v=s.getDataRange().getValues(),h=v[0].map(String),idc=h.indexOf('orderId');for(let i=1;i<v.length;i++)if(String(v[i][idc])===String(b.orderId)){const row=i+1,oldInventory=h.indexOf('inventoryState')>=0?v[i][h.indexOf('inventoryState')]:'',oldNote=v[i][h.indexOf('adminNote')],oldUpdatedAt=v[i][h.indexOf('updatedAt')],oldStatus=String(v[i][h.indexOf('status')]||'NEW'),newStatus=b.status!==undefined?String(b.status):oldStatus,legacy=String(v[i][h.indexOf('legacyOrder')]||'').toUpperCase()==='TRUE';if(newStatus===oldStatus){if(b.adminNote!==undefined)s.getRange(row,h.indexOf('adminNote')+1).setValue(String(b.adminNote).slice(0,500));return output({ok:true,idempotent:true});}if(legacy)throw Error('ออเดอร์เก่าไม่อยู่ในระบบจองสต๊อก V20.1 จึงไม่อนุญาตให้เปลี่ยนสถานะ');if(!ORDER_TRANSITIONS[oldStatus]||!ORDER_TRANSITIONS[oldStatus].includes(newStatus))throw Error('ไม่อนุญาตให้เปลี่ยนสถานะ '+oldStatus+' → '+newStatus);const items=orderItemsFor(b.orderId);if(!items.length)throw Error('ออเดอร์นี้ไม่มี OrderItems กรุณาตรวจสอบ Integrity ก่อน');if(newStatus==='COMPLETED'&&items.some(x=>String(x.pickStatus)!=='PICKED'))throw Error('ต้องจัดสินค้าครบทุกชิ้นก่อนปิดออเดอร์');if(['COMPLETED','CANCELLED'].includes(newStatus)&&String(oldInventory)!=='RESERVED')throw Error('สถานะสต๊อกของออเดอร์ไม่ใช่ RESERVED กรุณาตรวจสอบ Integrity ก่อน');let inventory=null;try{if(['COMPLETED','CANCELLED'].includes(newStatus))inventory=applyInventoryTransition(items,newStatus,b.orderId,actor);s.getRange(row,h.indexOf('status')+1).setValue(newStatus);if(inventory&&h.indexOf('inventoryState')>=0)s.getRange(row,h.indexOf('inventoryState')+1).setValue(inventory.state);if(b.adminNote!==undefined)s.getRange(row,h.indexOf('adminNote')+1).setValue(String(b.adminNote).slice(0,500));s.getRange(row,h.indexOf('updatedAt')+1).setValue(new Date());if(['COMPLETED','CANCELLED'].includes(newStatus))recalculateCustomerStats({tamer:v[i][h.indexOf('tamer')],server:v[i][h.indexOf('server')],contact:v[i][h.indexOf('contact')]});try{if(inventory)inventory.logs();log('ORDER_STATUS','ORDER',b.orderId,'',oldStatus+' → '+newStatus+' • '+(actor||'SYSTEM'));}catch(e){}invalidatePublicCache();return output({ok:true});}catch(err){if(inventory)try{inventory.rollback();}catch(e){}try{s.getRange(row,h.indexOf('status')+1).setValue(oldStatus);if(h.indexOf('inventoryState')>=0)s.getRange(row,h.indexOf('inventoryState')+1).setValue(oldInventory);if(h.indexOf('adminNote')>=0)s.getRange(row,h.indexOf('adminNote')+1).setValue(oldNote);if(h.indexOf('updatedAt')>=0)s.getRange(row,h.indexOf('updatedAt')+1).setValue(oldUpdatedAt);}catch(e){}throw err;}}throw Error('ไม่พบออเดอร์');});}
+
+function archiveOrder(b,actor){return withLock(()=>{const reason=safeSheetText(b.reason||'',300);if(!reason)throw Error('กรุณาระบุเหตุผลที่เก็บออเดอร์');const s=sheet(SHEETS.orders,HEADERS.orders),v=s.getDataRange().getValues(),h=v[0].map(String),idc=h.indexOf('orderId');for(let i=1;i<v.length;i++)if(String(v[i][idc])===String(b.orderId)){if(v[i][h.indexOf('deletedAt')])return output({ok:true,idempotent:true});const row=i+1,original=v[i].slice(),status=String(v[i][h.indexOf('status')]||'NEW'),inventoryState=String(v[i][h.indexOf('inventoryState')]||''),legacy=String(v[i][h.indexOf('legacyOrder')]||'').toUpperCase()==='TRUE',items=orderItemsFor(b.orderId);let inventory=null;try{if(!legacy&&inventoryState==='RESERVED'){if(!items.length)throw Error('ออเดอร์นี้ไม่มี OrderItems กรุณาตรวจสอบ Integrity ก่อน');inventory=applyInventoryTransition(items,'CANCELLED',b.orderId,actor);v[i][h.indexOf('status')]='CANCELLED';v[i][h.indexOf('inventoryState')]='RELEASED';}else if(!legacy&&!((status==='CANCELLED'&&inventoryState==='RELEASED')||(status==='COMPLETED'&&inventoryState==='DEDUCTED')))throw Error('สถานะสต๊อกของออเดอร์ไม่ปลอดภัย กรุณาตรวจสอบ Integrity ก่อน');v[i][h.indexOf('deletedAt')]=new Date();v[i][h.indexOf('deletedBy')]=actor||'SYSTEM';v[i][h.indexOf('deleteReason')]=reason;v[i][h.indexOf('updatedAt')]=new Date();s.getRange(row,1,1,h.length).setValues([v[i].slice(0,h.length)]);if(inventory)recalculateCustomerStats({tamer:v[i][h.indexOf('tamer')],server:v[i][h.indexOf('server')],contact:v[i][h.indexOf('contact')]});try{if(inventory)inventory.logs();log('ORDER_ARCHIVE','ORDER',b.orderId,'',(legacy?'LEGACY_NO_STOCK_ACTION • ':'')+status+' • '+reason+' • '+(actor||'SYSTEM'));}catch(e){}invalidatePublicCache();return output({ok:true,status:v[i][h.indexOf('status')],inventoryState:v[i][h.indexOf('inventoryState')],legacyOrder:legacy});}catch(err){if(inventory)try{inventory.rollback();}catch(e){}try{s.getRange(row,1,1,h.length).setValues([original.slice(0,h.length)]);}catch(e){}throw err;}}throw Error('ไม่พบออเดอร์');});}
+function restoreArchivedOrder(b,actor){return withLock(()=>{const s=sheet(SHEETS.orders,HEADERS.orders),v=s.getDataRange().getValues(),h=v[0].map(String),idc=h.indexOf('orderId');for(let i=1;i<v.length;i++)if(String(v[i][idc])===String(b.orderId)){if(!v[i][h.indexOf('deletedAt')])return output({ok:true,idempotent:true});v[i][h.indexOf('deletedAt')]='';v[i][h.indexOf('deletedBy')]='';v[i][h.indexOf('deleteReason')]='';v[i][h.indexOf('updatedAt')]=new Date();s.getRange(i+1,1,1,h.length).setValues([v[i].slice(0,h.length)]);try{log('ORDER_RESTORE','ORDER',b.orderId,'','กู้คืนโดยไม่เปลี่ยนสต๊อก • '+(actor||'SYSTEM'));}catch(e){}invalidatePublicCache();return output({ok:true,status:v[i][h.indexOf('status')],inventoryState:v[i][h.indexOf('inventoryState')]});}throw Error('ไม่พบออเดอร์');});}
 
 function customerKey(customer){
   const contact=String(customer.contact||'').trim().toLowerCase();
@@ -333,36 +459,21 @@ function customerKey(customer){
   return 'TAMER-'+Utilities.base64EncodeWebSafe(raw).slice(0,36);
 }
 function vipLevel(total){total=number(total);if(total>=50000)return'VIP';if(total>=20000)return'PLATINUM';if(total>=10000)return'GOLD';if(total>=5000)return'SILVER';return'NORMAL';}
-function upsertCustomerFromOrder(customer,total,now){
-  const s=sheet(SHEETS.customers,HEADERS.customers),vals=s.getDataRange().getValues(),h=vals[0].map(String),id=customerKey(customer);let row=-1;
-  for(let i=1;i<vals.length;i++)if(String(vals[i][0])===id){row=i+1;break;}
-  if(row<0){s.appendRow([id,now,now,customer.tamer||'',customer.server||'',customer.contact||'',1,number(total),vipLevel(total),'ACTIVE','',now]);return;}
-  const current=Object.fromEntries(h.map((k,j)=>[k,vals[row-1][j]])),nextCount=number(current.orderCount)+1,nextSpent=number(current.totalSpent)+number(total);
-  const updates={updatedAt:now,tamer:customer.tamer||current.tamer,server:customer.server||current.server,contact:customer.contact||current.contact,orderCount:nextCount,totalSpent:nextSpent,lastOrderAt:now};
-  if(!current.vipLevel||current.vipLevel==='NORMAL'||current.vipLevel==='SILVER'||current.vipLevel==='GOLD'||current.vipLevel==='PLATINUM')updates.vipLevel=vipLevel(nextSpent);
-  Object.keys(updates).forEach(k=>s.getRange(row,h.indexOf(k)+1).setValue(updates[k]));
-}
+function ensureCustomerProfile(customer,now){const s=sheet(SHEETS.customers,HEADERS.customers),v=s.getDataRange().getValues(),h=v[0].map(String),id=customerKey(customer);for(let i=1;i<v.length;i++)if(String(v[i][0])===id){const updated=v[i].slice();[['updatedAt',now],['tamer',customer.tamer],['server',customer.server],['contact',customer.contact],['lastOrderAt',now]].forEach(x=>{const c=h.indexOf(x[0]);if(c>=0&&x[1]!==undefined)updated[c]=x[1];});s.getRange(i+1,1,1,h.length).setValues([updated.slice(0,h.length)]);return id;}const data={customerId:id,createdAt:now,updatedAt:now,tamer:customer.tamer||'',server:customer.server||'',contact:customer.contact||'',orderCount:0,totalSpent:0,vipLevel:'NORMAL',status:'ACTIVE',lastOrderAt:now};s.appendRow(HEADERS.customers.map(k=>data[k]??''));return id;}
+function recalculateCustomerStats(customer){const id=customerKey(customer),s=sheet(SHEETS.customers,HEADERS.customers);let v=s.getDataRange().getValues(),h=v[0].map(String),row=v.findIndex((x,i)=>i>0&&String(x[0])===id);if(row<1){ensureCustomerProfile(customer,new Date());v=s.getDataRange().getValues();row=v.findIndex((x,i)=>i>0&&String(x[0])===id);}const completed=rows(SHEETS.orders).filter(o=>String(o.status)==='COMPLETED'&&customerKey(o)===id),total=completed.reduce((sum,o)=>sum+number(o.total),0);if(row>0){const start=h.indexOf('updatedAt'),end=h.indexOf('vipLevel'),values=v[row].slice(start,end+1);values[0]=new Date();values[h.indexOf('orderCount')-start]=completed.length;values[h.indexOf('totalSpent')-start]=total;values[h.indexOf('vipLevel')-start]=vipLevel(total);s.getRange(row+1,start+1,1,values.length).setValues([values]);}}
 function updateCustomer(b){return withLock(()=>{
   const s=sheet(SHEETS.customers,HEADERS.customers),vals=s.getDataRange().getValues(),h=vals[0].map(String),idc=h.indexOf('customerId');
   for(let i=1;i<vals.length;i++)if(String(vals[i][idc])===String(b.customerId)){
     const allowed=['tamer','server','contact','vipLevel','status','note','tags','preferredContact','followUpAt'];
-    allowed.forEach(k=>{if(b[k]!==undefined&&h.indexOf(k)>=0)s.getRange(i+1,h.indexOf(k)+1).setValue(b[k]);});
-    if(h.indexOf('updatedAt')>=0)s.getRange(i+1,h.indexOf('updatedAt')+1).setValue(new Date());
-    log('CUSTOMER_UPDATE','CUSTOMER',b.customerId,b.tamer||vals[i][h.indexOf('tamer')],JSON.stringify({vipLevel:b.vipLevel,status:b.status,tags:b.tags}));return output({ok:true});
+    const updated=vals[i].slice();allowed.forEach(k=>{if(b[k]!==undefined&&h.indexOf(k)>=0)updated[h.indexOf(k)]=b[k];});if(h.indexOf('updatedAt')>=0)updated[h.indexOf('updatedAt')]=new Date();s.getRange(i+1,1,1,h.length).setValues([updated.slice(0,h.length)]);
+    try{log('CUSTOMER_UPDATE','CUSTOMER',b.customerId,b.tamer||vals[i][h.indexOf('tamer')],JSON.stringify({vipLevel:b.vipLevel,status:b.status,tags:b.tags}));}catch(e){}return output({ok:true});
   }
   throw Error('ไม่พบลูกค้า');
 });}
-function addCustomerInteraction(b){return withLock(()=>{
+function addCustomerInteraction(b,actor){return withLock(()=>{
   if(!b.customerId)throw Error('ไม่พบรหัสลูกค้า');
-  const id=makeId('INTERACTION'),now=new Date();
-  sheet(SHEETS.customerInteractions,HEADERS.customerInteractions).appendRow([id,now,b.customerId,b.customerName||'',b.type||'NOTE',b.channel||'',b.note||'',b.nextFollowUpAt||'',ADMIN_ID]);
-  const s=sheet(SHEETS.customers,HEADERS.customers),vals=s.getDataRange().getValues(),h=vals[0].map(String),idc=h.indexOf('customerId');
-  for(let i=1;i<vals.length;i++)if(String(vals[i][idc])===String(b.customerId)){
-    if(h.indexOf('lastContactAt')>=0)s.getRange(i+1,h.indexOf('lastContactAt')+1).setValue(now);
-    if(b.nextFollowUpAt&&h.indexOf('followUpAt')>=0)s.getRange(i+1,h.indexOf('followUpAt')+1).setValue(b.nextFollowUpAt);
-    if(h.indexOf('updatedAt')>=0)s.getRange(i+1,h.indexOf('updatedAt')+1).setValue(now);break;
-  }
-  log('CUSTOMER_INTERACTION','CUSTOMER',b.customerId,b.customerName||'',JSON.stringify({type:b.type,channel:b.channel,note:b.note}));
+  const id=makeId('INTERACTION'),now=new Date(),s=sheet(SHEETS.customers,HEADERS.customers),vals=s.getDataRange().getValues(),h=vals[0].map(String),idc=h.indexOf('customerId'),row=vals.findIndex((x,i)=>i>0&&String(x[idc])===String(b.customerId));if(row<1)throw Error('ไม่พบลูกค้า');const updated=vals[row].slice();if(h.indexOf('lastContactAt')>=0)updated[h.indexOf('lastContactAt')]=now;if(b.nextFollowUpAt&&h.indexOf('followUpAt')>=0)updated[h.indexOf('followUpAt')]=b.nextFollowUpAt;if(h.indexOf('updatedAt')>=0)updated[h.indexOf('updatedAt')]=now;const interactionSheet=sheet(SHEETS.customerInteractions,HEADERS.customerInteractions);interactionSheet.appendRow([id,now,b.customerId,b.customerName||'',b.type||'NOTE',b.channel||'',String(b.note||'').slice(0,2000),b.nextFollowUpAt||'',actor||'SYSTEM']);try{s.getRange(row+1,1,1,h.length).setValues([updated.slice(0,h.length)]);}catch(err){try{deleteRowsByValue(interactionSheet,0,id);}catch(e){}throw err;}
+  try{log('CUSTOMER_INTERACTION','CUSTOMER',b.customerId,b.customerName||'',JSON.stringify({type:b.type,channel:b.channel,note:b.note}));}catch(e){}
   return output({ok:true,interactionId:id});
 });}
 function upsertPromotion(p){return withLock(()=>{
@@ -469,7 +580,7 @@ function importWikiImage(b){
 }
 
 function backupFolder(){let folders=DriveApp.getFoldersByName('DMO-Toolbox-Backups');return folders.hasNext()?folders.next():DriveApp.createFolder('DMO-Toolbox-Backups');}
-function backupTriggerActive(){return ScriptApp.getProjectTriggers().some(t=>t.getHandlerFunction()==='scheduledBackup');}
+function backupTriggerActive(){try{return ScriptApp.getProjectTriggers().some(t=>t.getHandlerFunction()==='scheduledBackup');}catch(e){return false;}}
 function listBackups(){return rows(SHEETS.backups).slice().reverse().map(x=>({...x,sizeBytes:number(x.sizeBytes)}));}
 function pruneBackups(){
   const retention=Math.max(1,number(settingValue('backupRetention',14))||14),s=sheet(SHEETS.backups,HEADERS.backups),vals=s.getDataRange().getValues();
@@ -499,24 +610,61 @@ function restoreBackupAction(b,actor){return withLock(()=>{
   const source=SpreadsheetApp.openById(String(rec.fileId));
   const skip=new Set([SHEETS.backups,SHEETS.sessions,SHEETS.users]);
   Object.keys(SHEETS).map(k=>SHEETS[k]).filter(name=>!skip.has(name)).forEach(name=>{
-    const srcSheet=source.getSheetByName(name);if(!srcSheet)return;const values=srcSheet.getDataRange().getValues();if(!values.length)return;
-    let target=ss().getSheetByName(name);if(!target)target=ss().insertSheet(name);target.clearContents();target.getRange(1,1,values.length,values[0].length).setValues(values);
+    const srcSheet=source.getSheetByName(name);if(!srcSheet)return;const srcRange=srcSheet.getDataRange(),values=srcRange.getValues(),formulas=srcRange.getFormulas();if(!values.length)return;
+    const restored=values.map((row,r)=>row.map((value,c)=>formulas[r][c]||value));let target=ss().getSheetByName(name);if(!target)target=ss().insertSheet(name);target.clearContents();const targetRange=target.getRange(1,1,restored.length,restored[0].length);targetRange.setValues(restored);try{targetRange.setNumberFormats(srcRange.getNumberFormats());targetRange.setDataValidations(srcRange.getDataValidations());targetRange.setBackgrounds(srcRange.getBackgrounds());targetRange.setFontColors(srcRange.getFontColors());targetRange.setFontWeights(srcRange.getFontWeights());}catch(formatErr){}
   });
   securityLog('BACKUP_RESTORE',actor.userId,rec.backupId);log('BACKUP_RESTORE','SYSTEM',rec.backupId,rec.fileName||'',actor.userId);return output({ok:true});
 });}
 function deleteBackupAction(b,actor){return withLock(()=>{requireRole(b.token,['OWNER']);const s=sheet(SHEETS.backups,HEADERS.backups),v=s.getDataRange().getValues();for(let i=1;i<v.length;i++)if(String(v[i][0])===String(b.backupId)){try{if(v[i][4])DriveApp.getFileById(String(v[i][4])).setTrashed(true);}catch(e){}s.deleteRow(i+1);securityLog('BACKUP_DELETE',actor.userId,b.backupId);return output({ok:true});}throw Error('ไม่พบ Backup');});}
-function automationAlerts(){
-  const products=[...rows(SHEETS.seals).map(normalizeSeal),...rows(SHEETS.items).map(normalizeItem)],orders=rows(SHEETS.orders),customers=rows(SHEETS.customers),now=Date.now();
+function automationAlerts(snapshot){
+  const products=snapshot?[...(snapshot.seals||[]),...(snapshot.gameItems||[])]:[...rows(SHEETS.seals).map(normalizeSeal),...rows(SHEETS.items).map(normalizeItem)],orders=snapshot?snapshot.orders||[]:rows(SHEETS.orders),customers=snapshot?snapshot.customers||[]:rows(SHEETS.customers),now=Date.now();
   const low=products.filter(p=>{const a=availableQty(p.stock,p.reservedStock);return a!==''&&a>0&&number(p.lowStockAlert)>0&&a<=number(p.lowStockAlert);});
   const out=products.filter(p=>p.status==='OUT_OF_STOCK'||(availableQty(p.stock,p.reservedStock)!==''&&availableQty(p.stock,p.reservedStock)<=0));
   const fresh=orders.filter(o=>String(o.status)==='NEW');
   const follow=customers.filter(c=>c.followUpAt&&new Date(c.followUpAt).getTime()<=now&&String(c.status||'ACTIVE')==='ACTIVE');
   return{lowStock:low.slice(0,50),outOfStock:out.slice(0,50),newOrders:fresh.slice(-50).reverse(),followUps:follow.slice(0,50),counts:{lowStock:low.length,outOfStock:out.length,newOrders:fresh.length,followUps:follow.length}};
 }
-function getAutomationData(actor){return{backups:actor&&['OWNER','ADMIN'].includes(actor.role)?listBackups().slice(0,50):[],triggerActive:backupTriggerActive(),backupEnabled:settingValue('backupEnabled',true)!==false,backupHour:number(settingValue('backupHour',3)),retention:number(settingValue('backupRetention',14))||14,alerts:automationAlerts()};}
+function getAutomationData(actor,snapshot){const settings=snapshot&&snapshot.settings||{},setting=(key,fallback)=>Object.prototype.hasOwnProperty.call(settings,key)?settings[key]:settingValue(key,fallback);return{backups:actor&&['OWNER','ADMIN'].includes(actor.role)?listBackups().slice(0,50):[],triggerActive:backupTriggerActive(),backupEnabled:setting('backupEnabled',true)!==false,backupHour:number(setting('backupHour',3)),retention:number(setting('backupRetention',14))||14,alerts:automationAlerts(snapshot)};}
 
+function runIntegrityCheck(){
+  const issues=[],orders=rows(SHEETS.orders),items=rows(SHEETS.orderItems),requests=rows(SHEETS.orderRequests),stockLogs=rows(SHEETS.stockLogs),customers=rows(SHEETS.customers),orderIds=new Set(orders.map(x=>String(x.orderId))),counts={};orders.forEach(o=>counts[o.orderId]=(counts[o.orderId]||0)+1);
+  Object.keys(counts).filter(id=>counts[id]>1).forEach(id=>issues.push({severity:'ERROR',code:'DUPLICATE_ORDER_ID',orderId:id,message:'พบเลขออเดอร์ซ้ำ '+counts[id]+' รายการ'}));
+  orders.filter(o=>!items.some(x=>String(x.orderId)===String(o.orderId))).forEach(o=>issues.push({severity:'ERROR',code:'ORDER_WITHOUT_ITEMS',orderId:o.orderId,message:'ออเดอร์ไม่มี OrderItems'}));
+  items.filter(x=>!orderIds.has(String(x.orderId))).forEach(x=>issues.push({severity:'ERROR',code:'ITEM_WITHOUT_ORDER',orderId:x.orderId,orderItemId:x.orderItemId,message:'OrderItem ไม่มี Orders ต้นทาง'}));
+  const requestOrderIds=new Set(requests.filter(x=>String(x.status)==='COMPLETED').map(x=>String(x.orderId)));
+  const requestIds=new Set(requests.map(x=>String(x.requestId)));
+  orders.filter(o=>o.requestId&&!requestIds.has(String(o.requestId))).forEach(o=>issues.push({severity:'ERROR',code:'ORDER_WITHOUT_REQUEST',orderId:o.orderId,message:'ออเดอร์มี requestId แต่ไม่พบ OrderRequests ต้นทาง'}));
+  requests.filter(x=>String(x.status)==='COMPLETED'&&x.orderId&&!orderIds.has(String(x.orderId))).forEach(x=>issues.push({severity:'ERROR',code:'REQUEST_WITHOUT_ORDER',orderId:x.orderId,requestId:x.requestId,message:'OrderRequests สำเร็จแต่ไม่พบ Orders'}));
+  orders.filter(o=>o.requestId&&!requestOrderIds.has(String(o.orderId))).forEach(o=>issues.push({severity:'WARN',code:'REQUEST_NOT_COMPLETED',orderId:o.orderId,requestId:o.requestId,message:'ออเดอร์มีอยู่แต่ OrderRequests ยังไม่ COMPLETED'}));
+  [...rows(SHEETS.seals).map(x=>({...x,kind:'SEAL'})),...rows(SHEETS.items).map(x=>({...x,kind:'ITEM'}))].forEach(p=>{if(p.stock!==''&&number(p.stock)<0)issues.push({severity:'ERROR',code:'NEGATIVE_STOCK',kind:p.kind,productId:p.id,message:'Stock ติดลบ'});if(number(p.reservedStock)<0)issues.push({severity:'ERROR',code:'NEGATIVE_RESERVED',kind:p.kind,productId:p.id,message:'Reserved Stock ติดลบ'});if(p.stock!==''&&number(p.reservedStock)>number(p.stock))issues.push({severity:'ERROR',code:'RESERVED_OVER_STOCK',kind:p.kind,productId:p.id,message:'Reserved Stock มากกว่า Stock'});});
+  orders.forEach(o=>{const state=String(o.inventoryState||''),legacy=String(o.legacyOrder||'').toUpperCase()==='TRUE';if(legacy)return;if(o.status==='COMPLETED'&&state!=='DEDUCTED')issues.push({severity:'ERROR',code:'COMPLETED_INVENTORY_STATE',orderId:o.orderId,message:'COMPLETED แต่ inventoryState ไม่ใช่ DEDUCTED'});if(o.status==='CANCELLED'&&state!=='RELEASED')issues.push({severity:'ERROR',code:'CANCELLED_INVENTORY_STATE',orderId:o.orderId,message:'CANCELLED แต่ inventoryState ไม่ใช่ RELEASED'});if(!['COMPLETED','CANCELLED'].includes(String(o.status))&&state!=='RESERVED')issues.push({severity:'ERROR',code:'OPEN_INVENTORY_STATE',orderId:o.orderId,message:'ออเดอร์เปิดอยู่แต่ inventoryState ไม่ใช่ RESERVED'});});
+  orders.filter(o=>String(o.inventoryState||'')).forEach(o=>{const orderItems=items.filter(x=>String(x.orderId)===String(o.orderId)),requiresLog=orderItems.some(x=>String(x.stockCheck)==='OK'&&String(x.kind)!=='SERVICE');if(!requiresLog)return;const related=stockLogs.filter(x=>String(x.reason||'').includes(String(o.orderId)));if(!related.length)issues.push({severity:'WARN',code:'ORDER_WITHOUT_STOCK_LOG',orderId:o.orderId,message:'ออเดอร์มีการเปลี่ยนสต๊อกแต่ไม่พบ StockLogs'});});
+  const customerIds=new Set(customers.map(x=>String(x.customerId)));
+  orders.forEach(o=>{if(String(o.legacyOrder||'').toUpperCase()==='TRUE')return;const id=customerKey(o);if(id&&!customerIds.has(id))issues.push({severity:'WARN',code:'ORDER_WITHOUT_CUSTOMER',orderId:o.orderId,customerId:id,message:'ไม่พบโปรไฟล์ลูกค้าของออเดอร์'});});
+  customers.forEach(c=>{const completed=orders.filter(o=>String(o.status)==='COMPLETED'&&customerKey(o)===String(c.customerId)),total=completed.reduce((sum,o)=>sum+number(o.total),0);if(number(c.orderCount)!==completed.length||Math.abs(number(c.totalSpent)-total)>0.01)issues.push({severity:'ERROR',code:'CUSTOMER_TOTAL_MISMATCH',customerId:c.customerId,message:'ยอดสะสมลูกค้าไม่ตรงกับออเดอร์ COMPLETED'});});
+  return{checkedAt:new Date().toISOString(),summary:{orders:orders.length,orderItems:items.length,orderRequests:requests.length,stockLogs:stockLogs.length,customers:customers.length,issues:issues.length,errors:issues.filter(x=>x.severity==='ERROR').length,warnings:issues.filter(x=>x.severity==='WARN').length},issues:issues.slice(0,500)};
+}
+function safeAdminError(err){const message=String(err&&err.message||err||'');return message.length&&message.length<=300?message:'ทำรายการไม่สำเร็จ';}
+function publicFailure(err){const message=String(err&&err.message||err||''),allowed=['กรุณา','ไม่มีสินค้า','ไม่พบสินค้า','ไม่พร้อมขาย','สต๊อก','จำนวนสินค้า','ประเภทสินค้า','ออเดอร์','คำขอ','บัญชี','ไอดีหรือรหัสผ่าน','ลองเข้าสู่ระบบ','ระบบยังไม่พร้อม'];const safe=allowed.some(x=>message.includes(x))?message:'ระบบไม่สามารถทำรายการได้ กรุณาลองใหม่หรือติดต่อร้าน';return output({ok:false,error:safe});}
+function safeSheetText(value,maxLength){let text=String(value??'').replace(/\u0000/g,'').trim().slice(0,maxLength||500);if(/^[=+\-@]/.test(text))text="'"+text;return text;}
 function number(v){return Number(String(v??'').replace(/,/g,''))||0;}
-function log(action,kind,id,name,details){sheet(SHEETS.logs,HEADERS.logs).appendRow([new Date(),action,kind,id,name,details||'']);}
-function onOpen(){SpreadsheetApp.getUi().createMenu('DMO Toolbox').addItem('ตรวจโครงสร้างฐานข้อมูล','menuInitialize').addToUi();}
-function menuInitialize(){ensureDatabase();SpreadsheetApp.getUi().alert('ฐานข้อมูล DMO Toolbox Ultimate V19 พร้อมใช้งาน');}
+function log(action,kind,id,name,details){sheet(SHEETS.logs,HEADERS.logs).appendRow([new Date(),safeSheetText(action,80),safeSheetText(kind,80),safeSheetText(id,180),safeSheetText(name,250),safeSheetText(details||'',4000)]);}
+function initializeOwnerPassword(){
+  ensureDatabase();const ui=SpreadsheetApp.getUi(),idPrompt=ui.prompt('ตั้งค่าบัญชี OWNER','กรอก User ID ของเจ้าของร้าน (ห้ามใช้รหัสผ่านเดิมที่เคยเผยแพร่)',ui.ButtonSet.OK_CANCEL);if(idPrompt.getSelectedButton()!==ui.Button.OK)return;const id=String(idPrompt.getResponseText()||'').trim();if(!id)return ui.alert('กรุณากรอก User ID');const passPrompt=ui.prompt('ตั้งรหัสผ่านใหม่','กรอกรหัสผ่านอย่างน้อย 10 ตัวอักษร ระบบจะเก็บเฉพาะ salted hash',ui.ButtonSet.OK_CANCEL);if(passPrompt.getSelectedButton()!==ui.Button.OK)return;const password=String(passPrompt.getResponseText()||'');if(password.length<10)return ui.alert('รหัสผ่านต้องมีอย่างน้อย 10 ตัวอักษร');const s=sheet(SHEETS.users,HEADERS.users),v=s.getDataRange().getValues(),h=v[0].map(String),now=new Date(),rec=securePasswordRecord(password);let row=-1;for(let i=1;i<v.length;i++)if(String(v[i][0])===id){row=i+1;break;}const data={userId:id,displayName:'Owner',passwordHash:rec.hash,role:'OWNER',status:'ACTIVE',createdAt:now,updatedAt:now,lastLoginAt:'',passwordSalt:rec.salt,passwordAlgo:rec.algo,mustChangePassword:'FALSE',failedLoginCount:0,lockedUntil:''};if(row<0)s.appendRow(HEADERS.users.map(k=>data[k]??''));else HEADERS.users.forEach(k=>{const c=h.indexOf(k);if(c>=0&&data[k]!==undefined)s.getRange(row,c+1).setValue(data[k]);});CacheService.getScriptCache().remove(loginThrottleKey(id));securityLog('OWNER_PASSWORD_RESET',id,'SHEET_EDITOR_ACTION');ui.alert('ตั้งค่าบัญชี OWNER สำเร็จแล้ว');
+}
+function assertSpreadsheetOwner(){const active=String(Session.getActiveUser().getEmail()||'').toLowerCase(),effective=String(Session.getEffectiveUser().getEmail()||'').toLowerCase(),owner=String(DriveApp.getFileById(ss().getId()).getOwner().getEmail()||'').toLowerCase();if(!active||active!==owner||effective!==owner)throw Error('อนุญาตเฉพาะเจ้าของไฟล์ Google Sheet เท่านั้น');return owner;}
+function ownerSecuritySidebar(){const id=SpreadsheetApp.getActive().getId(),environment=id===PRODUCTION_SPREADSHEET_ID?'PRODUCTION':id===TEST_SPREADSHEET_ID?'TEST':'BACKUP';return HtmlService.createHtmlOutput(`<!doctype html><html><head><base target="_top"><style>body{font:14px system-ui;padding:18px;color:#15243a}label{display:block;margin:12px 0 5px;font-weight:700}input{box-sizing:border-box;width:100%;padding:10px;border:1px solid #9aabc0;border-radius:8px}button{width:100%;margin-top:16px;padding:11px;border:0;border-radius:8px;background:#1677db;color:white;font-weight:800}small{color:#52657c}.env{padding:10px;border-radius:8px;background:${environment==='PRODUCTION'?'#ffe3e6':environment==='TEST'?'#fff2c7':'#ffd9d9'};font-weight:800}.msg{margin-top:12px;white-space:pre-wrap}</style></head><body><div class="env">Environment: ${environment}</div><h2>ตั้งค่า/กู้คืน OWNER</h2><small>เฉพาะเจ้าของไฟล์ Google Sheet เท่านั้น ระบบจะตรวจสิทธิ์และ Environment ที่ Server ก่อนบันทึก และไม่เก็บรหัสผ่านจริง</small><label>User ID</label><input id="uid" autocomplete="username"><label>รหัสผ่านใหม่ (อย่างน้อย 10 ตัว)</label><input id="pass" type="password" autocomplete="new-password"><label>ยืนยันรหัสผ่านใหม่</label><input id="confirm" type="password" autocomplete="new-password"><button id="submit" onclick="save()">ตั้งค่า OWNER</button><div class="msg" id="msg"></div><script>function save(){const b=document.getElementById('submit'),m=document.getElementById('msg'),p=document.getElementById('pass').value,c=document.getElementById('confirm').value;if(p.length<10){m.textContent='รหัสผ่านต้องมีอย่างน้อย 10 ตัวอักษร';return}if(p!==c){m.textContent='ยืนยันรหัสผ่านไม่ตรงกัน';return}b.disabled=true;m.textContent='กำลังดำเนินการ...';google.script.run.withSuccessHandler(x=>{m.textContent=x.message;b.style.display='none';document.getElementById('pass').value='';document.getElementById('confirm').value=''}).withFailureHandler(e=>{m.textContent=e.message;b.disabled=false}).saveOwnerFromSidebar({userId:document.getElementById('uid').value,password:p,confirmPassword:c});}</script></body></html>`).setTitle('บัญชี OWNER');}
+function initializeOwnerPassword(){SpreadsheetApp.getUi().showSidebar(ownerSecuritySidebar());}
+function authorizeOwnerSetup(){ensureDatabase();assertSpreadsheetOwner();const env=environmentInfo();if(!env.ownerSetupAllowed)throw Error('ฐานข้อมูลนี้เป็น BACKUP จึงไม่อนุญาตให้ตั้ง OWNER');return{ok:true,environment:env.environment,message:'อนุญาตสิทธิ์สำเร็จ กลับไปเปิดเมนูตั้งค่า OWNER ใน Google Sheet'};}
+function saveOwnerFromSidebar(p){return withLock(()=>{assertSpreadsheetOwner();const env=environmentInfo();if(!env.ownerSetupAllowed)throw Error('ไม่อนุญาตให้ตั้ง OWNER บนฐานข้อมูล BACKUP');const id=String(p&&p.userId||'').trim(),password=String(p&&p.password||''),confirm=String(p&&p.confirmPassword||'');if(!id)throw Error('กรุณากรอก User ID');if(password.length<10)throw Error('รหัสผ่านต้องมีอย่างน้อย 10 ตัวอักษร');if(password!==confirm)throw Error('ยืนยันรหัสผ่านไม่ตรงกัน');const s=sheet(SHEETS.users,HEADERS.users),v=s.getDataRange().getValues(),h=v[0].map(String),owners=[];for(let i=1;i<v.length;i++)if(String(v[i][h.indexOf('role')])==='OWNER'&&String(v[i][h.indexOf('status')])==='ACTIVE')owners.push(i+1);if(owners.length>1)throw Error('พบบัญชี OWNER มากกว่า 1 บัญชี กรุณาตรวจสอบก่อน');if(owners.length===1&&String(v[owners[0]-1][h.indexOf('userId')])!==id)throw Error('User ID ไม่ตรงกับ OWNER ปัจจุบัน');const rec=securePasswordRecord(password),now=new Date(),data={userId:id,displayName:owners.length?String(v[owners[0]-1][h.indexOf('displayName')]||'Owner'):'Owner',passwordHash:rec.hash,role:'OWNER',status:'ACTIVE',createdAt:owners.length?v[owners[0]-1][h.indexOf('createdAt')]:now,updatedAt:now,lastLoginAt:owners.length?v[owners[0]-1][h.indexOf('lastLoginAt')]:'',passwordSalt:rec.salt,passwordAlgo:rec.algo,mustChangePassword:'FALSE',failedLoginCount:0,lockedUntil:''};if(owners.length)HEADERS.users.forEach((k,j)=>s.getRange(owners[0],j+1).setValue(data[k]??''));else s.appendRow(HEADERS.users.map(k=>data[k]??''));invalidateUserSessions(id);CacheService.getScriptCache().remove(loginThrottleKey(id));securityLog(owners.length?'OWNER_EMERGENCY_RESET':'OWNER_INITIAL_SETUP',id,env.environment+'_SHEET_OWNER_ACTION');return{ok:true,message:owners.length?'รีเซ็ตรหัส OWNER สำเร็จ กรุณาเข้าสู่ระบบใหม่':'ตั้งค่าบัญชี OWNER สำเร็จแล้ว'};});}
+function onOpen(){SpreadsheetApp.getUi().createMenu('GUN SHOP DMO').addItem('ตรวจโครงสร้างฐานข้อมูล','menuInitialize').addItem('ตั้งค่า/กู้คืน OWNER (เจ้าของไฟล์เท่านั้น)','initializeOwnerPassword').addToUi();}
+function menuInitialize(){ensureDatabase();SpreadsheetApp.getUi().alert('ฐานข้อมูล GUN SHOP DMO V20.1 พร้อมใช้งาน');}
+function verifyLegacyMigration(){
+  const orders=rows(SHEETS.orders),items=rows(SHEETS.orderItems),legacy=orders.filter(o=>String(o.legacyOrder||'').toUpperCase()==='TRUE'),orderIds=new Set(orders.map(o=>String(o.orderId))),itemIds=items.map(x=>String(x.orderItemId)),orphans=items.filter(x=>!orderIds.has(String(x.orderId))),duplicates=itemIds.length-new Set(itemIds).size,products=[...rows(SHEETS.seals),...rows(SHEETS.items)],reservedTotal=products.reduce((sum,p)=>sum+number(p.reservedStock),0),legacyStockLogs=rows(SHEETS.stockLogs).filter(x=>legacy.some(o=>String(x.reason||'').includes(String(o.orderId)))),integrity=runIntegrityCheck();
+  const result={orders:orders.length,orderItems:items.length,legacyOrders:legacy.length,orphanOrderItems:orphans.length,duplicateOrderItemIds:duplicates,reservedStockTotal:reservedTotal,legacyStockLogs:legacyStockLogs.length,integrity:integrity.summary};
+  if(result.orders!==16||result.orderItems!==40||result.legacyOrders!==16||result.orphanOrderItems||result.duplicateOrderItemIds||result.reservedStockTotal||result.legacyStockLogs||integrity.summary.errors||integrity.summary.warnings)throw Error('Legacy verification failed: '+JSON.stringify(result));
+  return result;
+}
+function createLegacyCheckpointBackup(){return createServerBackup('POST_LEGACY_MIGRATION_CHECKPOINT','SYSTEM');}
+function verifyProductionOwner(){const owners=rows(SHEETS.users).filter(u=>String(u.role)==='OWNER'&&String(u.status)==='ACTIVE');if(owners.length!==1)throw Error('OWNER verification failed: '+owners.length);return{owners:owners.length,userId:owners[0].userId,passwordAlgo:owners[0].passwordAlgo,mustChangePassword:owners[0].mustChangePassword};}
 function output(obj){return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);}

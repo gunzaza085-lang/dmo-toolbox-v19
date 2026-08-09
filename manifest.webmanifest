@@ -1,6 +1,6 @@
 {
-  "name": "DMO Toolbox Ultimate",
-  "short_name": "DMO Toolbox",
+  "name": "GUN SHOP DMO",
+  "short_name": "GUN SHOP DMO",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#071426",
@@ -17,5 +17,6 @@
       "sizes": "512x512",
       "type": "image/png"
     }
-  ]
+  ],
+  "description": "GUN SHOP DMO V20.1 Stability & Security Final โดย Natthananat Kawinwatthanakorn"
 }

@@ -1,0 +1,40 @@
+MIGRATION: V20 DATABASE 3.0.0 > V20.1 DATABASE 3.1.0
+=====================================================
+
+Migration เป็นแบบเพิ่มโครงสร้างและทำซ้ำได้ โดยไม่ลบข้อมูลสินค้าเดิม
+
+Orders เพิ่มคอลัมน์:
+- requestId: รหัสคำขอจาก Browser สำหรับป้องกันออเดอร์ซ้ำ
+- pricingJson: snapshot การคำนวณราคาและโปรโมชั่นจาก Server
+- inventoryState: RESERVED / RELEASED / DEDUCTED
+
+Users เพิ่มคอลัมน์:
+- passwordSalt
+- passwordAlgo
+- mustChangePassword
+- failedLoginCount
+- lockedUntil
+
+เพิ่มชีต OrderRequests:
+- requestId
+- createdAt
+- orderId
+- contactHash
+- status
+- responseJson
+
+System:
+- databaseVersion = 3.1.0
+- securityVersion = 2.0
+- orderVersion = 2.0
+
+บัญชีที่ใช้ credential เริ่มต้นซึ่งเป็นที่ทราบจะถูกเปลี่ยนเป็น RESET_REQUIRED
+ให้เจ้าของชีตใช้เมนู GUN SHOP DMO > ตั้ง/รีเซ็ตรหัส OWNER หลังติดตั้ง Script
+
+ข้อควรระวัง:
+- สำรอง Google Sheet จริงก่อน Migration
+- ทดลองกับสำเนาก่อน Production
+- ห้ามเปลี่ยนชื่อชีตหรือหัวคอลัมน์เดิม
+- Migration ไม่แก้รายการสินค้า ราคา หรือลูกค้าเดิม
+- totalSpent เดิมอาจยังรวมออเดอร์ที่ไม่สมบูรณ์ จนกว่าจะทำ reconciliation ที่ตรวจสอบแล้ว
+
