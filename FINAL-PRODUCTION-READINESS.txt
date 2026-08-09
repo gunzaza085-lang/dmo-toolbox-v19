@@ -1,0 +1,78 @@
+GUN SHOP DMO V20.1 - FINAL PRODUCTION READINESS
+================================================
+Verified: 2026-08-09 (Asia/Bangkok)
+Owner: Natthananat Kawinwatthanakorn
+Release: V20.1
+Database version: 3.1.0
+Apps Script deployment version: 7
+
+FINAL RESULT
+------------
+PRODUCTION READINESS: 100% FOR THE VERIFIED RELEASE SCOPE
+PRODUCTION DEPLOYMENT: PASS
+WEBSITE: PASS
+APPS SCRIPT: PASS
+DATABASE: PASS
+ADMIN: PASS
+SECURITY: PASS
+INTEGRITY: PASS
+PWA: PASS
+
+PRODUCTION DATA VERIFICATION
+----------------------------
+- Seals: 231
+- Items: 3
+- Services: 0 (verified Production value)
+- Orders: 16
+- OrderItems: 40
+- Products with reservedStock greater than zero: 0
+- Products with negative stock: 0
+- Integrity issues: 0
+- Integrity errors: 0
+- Integrity warnings: 0
+
+PRODUCTION SMOKE TESTS
+----------------------
+PASS - Public storefront loads from GitHub Pages
+PASS - Public product catalog loads (231 active public seals and 2 active public items)
+PASS - Search and filter
+PASS - Add to cart
+PASS - Production API connection
+PASS - OWNER login
+PASS - Session persists after reload
+PASS - Logout invalidates the session
+PASS - Admin dashboard
+PASS - Orders and Picking Center load all 16 legacy orders
+PASS - Stock page loads 234 catalog records
+PASS - Integrity Checker reports Error 0 and Warning 0
+PASS - No browser console error after the Apps Script trigger-permission fallback
+PASS - Latest manifest and service worker are served by GitHub Pages
+
+SECURITY VERIFICATION
+---------------------
+PASS - Passwords are stored using the existing salted hash mechanism; no plaintext credential was added
+PASS - Public API does not expose passwordHash, passwordSalt, session data, costPrice, or reservedStock
+PASS - Server-side authentication and permissions remain enabled
+PASS - Server-side pricing, stock validation, requestId idempotency, Script Lock, and order-state validation remain enabled
+PASS - No TEST URL, TEST credential, RC_TEST, localhost, or debug configuration is present in deployed runtime files
+
+REGRESSION
+----------
+Command: node tests/v20_1_audit.js
+PASS: 13
+FAIL: 0
+Live order and stock mutation flows were previously verified on TEST. No real Production order was created during smoke testing.
+
+DEPLOYMENT RECORD
+-----------------
+- Production Apps Script deployed as Version 7 using the existing Production URL
+- Production database preserved and verified at version 3.1.0
+- GitHub main updated by fast-forward from the validated V20.1 release commit
+- GitHub Pages serves the V20.1 runtime and Production API configuration
+- A Production Sheet backup was created before OWNER/security deployment
+- Production Orders, OrderItems, Stock, reservedStock, Customers, and Settings were not cleared or reset
+
+DECISION
+--------
+GUN SHOP DMO V20.1 passed the defined Production smoke, security, integrity, regression,
+Admin, database, API, and PWA checks. The verified release is ready to receive real orders.
