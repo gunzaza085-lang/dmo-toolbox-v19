@@ -48,6 +48,13 @@ PASS - Integrity Checker reports Error 0 and Warning 0
 PASS - No browser console error after the Apps Script trigger-permission fallback
 PASS - Latest manifest and service worker are served by GitHub Pages
 
+OPERATIONAL STOCK NOTE
+----------------------
+- The Production storefront loads all 231 seals, but the current Production seal stock values are zero/blank.
+- Seal cards therefore correctly show sold out and cannot be ordered yet.
+- No Production stock value was invented or changed during deployment.
+- The owner must enter verified sellable stock before accepting seal orders.
+
 SECURITY VERIFICATION
 ---------------------
 PASS - Passwords are stored using the existing salted hash mechanism; no plaintext credential was added
@@ -75,4 +82,5 @@ DEPLOYMENT RECORD
 DECISION
 --------
 GUN SHOP DMO V20.1 passed the defined Production smoke, security, integrity, regression,
-Admin, database, API, and PWA checks. The verified release is ready to receive real orders.
+Admin, database, API, and PWA checks. The software release is Production-ready. Seal ordering
+will become operational after the owner enters verified sellable Production stock.
