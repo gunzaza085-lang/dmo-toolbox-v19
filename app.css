@@ -74,6 +74,12 @@ input[type="checkbox"]{accent-color:#1fc1df;width:18px;height:18px;vertical-alig
 /* compact repeat order */
 .recent-order-strip{display:inline-flex;max-width:460px;padding:7px 9px;margin:0 0 10px;border-radius:10px;background:#0a1b30}.recent-order-strip div{flex-direction:row;align-items:center;gap:8px}.recent-order-strip b{font-size:12px}.recent-order-strip span{font-size:11px}.recent-order-strip .btn{padding:5px 8px;font-size:11px}
 .customer-nav #repeatLatestBtn{padding:8px 10px;font-size:12px;min-width:auto}
+
+/* V20.2 Phase 1: make copy-to-chat the primary customer action. */
+.copy-order-primary{font-size:16px;padding:14px 16px;box-shadow:0 8px 24px rgba(35,178,109,.22)}
+.facebook-btn{display:block;text-align:center;background:#1557a8;border-color:#2879d8}
+.copy-success{border:1px solid #1b8c5c;background:#0b3d2a;color:#9cf0c2;padding:11px 12px;border-radius:11px;font-weight:750}
+@media(max-width:720px){.mobile-bottom-nav{grid-template-columns:repeat(5,1fr)}}
 /* order success */
 .order-success-card{border:1px solid #1a9960;background:linear-gradient(145deg,#0b3c29,#08271e);padding:18px;border-radius:15px;text-align:center}.order-success-card .check{font-size:46px}.order-success-card h2{margin:5px 0}.order-success-card .order-code{font-size:22px;color:#70f0b1;font-weight:900;letter-spacing:.03em}.order-success-card p{color:#cfeee0;line-height:1.6}.order-success-actions{display:flex;justify-content:center;gap:8px;flex-wrap:wrap;margin-top:13px}
 /* admin order command center */
@@ -95,3 +101,30 @@ select option{background:var(--panel);color:var(--text)}
 :root[data-theme="LIGHT"] .order-success-card{background:#effcf5;color:#123b2a;border-color:#65b98b}
 :root[data-theme="LIGHT"] .order-success-card .order-code{color:#087043}
 @media(max-width:420px){.app-shell{width:100%}.panel{padding:12px}.hero{padding:14px 12px}.order-card-v20{padding:10px}.pick-row{grid-template-columns:26px minmax(0,1fr)}.pick-row>.stock-ok,.pick-row>.stock-warn,.pick-row>button{grid-column:2/-1}.order-success-actions .btn{width:100%}}
+
+/* V20.2 Phase 2: product images, mobile marketplace UX and image management */
+.product-image-frame{position:relative;width:92px;height:92px;border-radius:15px;overflow:hidden;background:radial-gradient(circle,#143459,#061325 75%);border:1px solid var(--line);display:grid;place-items:center}
+.product-image-frame .product-img{position:relative;z-index:2;width:100%;height:100%;border:0;border-radius:0;object-fit:contain;background:transparent}
+.product-image-frame .image-fallback{position:absolute;inset:0;display:grid;place-items:center;font-size:38px;opacity:.78;filter:drop-shadow(0 4px 8px rgba(0,0,0,.35))}
+.admin-thumb{position:relative}.admin-thumb>span{position:absolute;inset:0;display:grid;place-items:center;font-size:24px;opacity:.7}.admin-thumb>img{position:relative;z-index:2}
+.product-image-frame.is-broken{border-style:dashed}.product-image-frame.is-broken:after{content:"ไม่มีรูป";position:absolute;left:0;right:0;bottom:5px;text-align:center;color:var(--muted);font-size:9px}
+.favorite-btn{top:5px;right:5px;width:30px;height:30px;font-size:18px;box-shadow:0 4px 12px rgba(0,0,0,.28)}
+.load-more{display:block;margin:14px auto 0;min-width:220px}.empty{display:grid;gap:9px;justify-items:center}.empty .btn{width:auto}
+.commerce-flow{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:9px 0 12px;color:var(--muted);font-size:12px}.commerce-flow b{color:var(--text);border:1px solid var(--line);border-radius:999px;padding:5px 8px;background:var(--panel2)}.commerce-flow i{font-style:normal;color:var(--cyan)}
+.service-poster{display:block;padding:0;background:#061325}.service-poster img{display:block;width:100%;height:auto;max-height:480px;object-fit:contain;border-radius:17px;background:#061325}
+.image-import-guide{display:grid;gap:5px;border:1px solid var(--line);background:var(--panel2);border-radius:13px;padding:13px;margin:12px 0}.image-import-guide span,.image-import-guide small{color:var(--muted)}.image-import-guide code{color:#71e6f3}
+.image-upload-row{display:grid;grid-template-columns:minmax(170px,.45fr) minmax(220px,1fr) auto;gap:12px;align-items:center;border:1px dashed #3d739b;border-radius:14px;padding:14px}.file-drop{display:grid;place-items:center;min-height:74px;background:#0a2943;border-radius:11px;color:#8eeaf3;font-weight:800;cursor:pointer}.file-drop input{max-width:230px;margin-top:7px;font-size:12px}
+.image-summary{display:grid;grid-template-columns:repeat(5,minmax(105px,1fr));gap:8px;margin:14px 0}.image-summary .metric{padding:11px}.image-summary .metric b{font-size:23px}.image-preview-grid{display:grid;grid-template-columns:1.25fr .75fr;gap:12px}.image-map-list{display:grid;gap:7px;max-height:430px;overflow:auto}.image-map-row{display:grid;grid-template-columns:auto minmax(130px,.7fr) minmax(200px,1fr);gap:8px;align-items:center;border:1px solid var(--line);border-radius:10px;padding:9px;background:#08182d}.image-map-row small{grid-column:2/-1;color:var(--muted)}.overwrite-confirm{display:flex;align-items:center;gap:8px;margin:14px 0;padding:11px;border:1px solid #9a6c16;background:#33250d;border-radius:11px;color:#ffd77a}.image-apply{width:100%;padding:14px}.notice{display:grid;gap:4px;border:1px solid var(--line);border-radius:11px;padding:11px;margin:11px 0}.notice.success{background:#0b3d2a;border-color:#1b8c5c;color:#aaf0c8}.notice.danger{background:#421b24;border-color:#9a3544;color:#ffc0c7}
+:root[data-theme="LIGHT"] .product-image-frame,:root[data-theme="LIGHT"] .service-poster,:root[data-theme="LIGHT"] .service-poster img,:root[data-theme="LIGHT"] .image-map-row{background:#f4f8fc}:root[data-theme="LIGHT"] .file-drop{background:#e7f6fc;color:#126782}
+@media(max-width:900px){.image-summary{grid-template-columns:repeat(3,1fr)}.image-preview-grid{grid-template-columns:1fr}.image-upload-row{grid-template-columns:1fr}.image-map-row{grid-template-columns:auto 1fr}.image-map-row span:not(.badge),.image-map-row small{grid-column:2}}
+@media(max-width:720px){.product-card{grid-template-columns:88px minmax(0,1fr);padding:10px}.product-image-frame{width:88px;height:104px}.product-actions{justify-content:stretch}.product-actions .qty-input{width:82px}.product-actions .btn{flex:1;min-height:44px}.favorite-btn{width:28px;height:28px;font-size:16px}.cart-item{padding:10px}.cart-controls button{min-height:38px}.copy-order-primary,.facebook-btn,#saveOrderBtn{min-height:48px}.service-poster img{max-height:360px}.image-summary{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:420px){.product-card{grid-template-columns:82px minmax(0,1fr)}.product-image-frame{width:82px;height:98px}.product-img{width:100%;height:100%}.product-description{-webkit-line-clamp:1}.tag-line{display:none}.image-map-row{font-size:12px}}
+
+/* V20.2 Phase 3: safer checkout, clearer picking, spam review and post generator. */
+.order-honeypot{position:absolute!important;left:-10000px!important;width:1px!important;height:1px!important;opacity:0!important;pointer-events:none!important}
+.pick-row{grid-template-columns:30px minmax(120px,.7fr) minmax(180px,1.2fr) minmax(110px,.55fr) minmax(170px,.9fr) auto}
+.pick-category{color:#80dff0;font-size:12px;font-weight:800}.pick-quantity b,.pick-stock{display:block}.pick-stock small{font-size:10px}.order-card-v20.spam-order{border-color:#a64150;background:#25121b}.spam-note{margin:8px 0;padding:9px;border:1px solid #93404d;background:#35151d;border-radius:10px;color:#ffc1c8}.order-kpi.spam b{color:#ff8490}
+.marketing-generator{max-width:1040px}.marketing-preview{width:100%;min-height:520px;margin-top:8px;white-space:pre-wrap;font-family:inherit;line-height:1.65}.marketing-generator .chip-row{margin-top:12px}
+:root[data-theme="LIGHT"] .order-card-v20.spam-order,:root[data-theme="LIGHT"] .spam-note{background:#fff1f3;color:#6a1d27}
+@media(max-width:1050px){.pick-row{grid-template-columns:28px minmax(110px,.7fr) minmax(170px,1fr) minmax(100px,.55fr)}.pick-stock{grid-column:2/5}.pick-row>button{grid-column:5}}
+@media(max-width:720px){.pick-row{grid-template-columns:26px minmax(0,1fr)}.pick-category,.pick-name,.pick-quantity,.pick-stock,.pick-row>button{grid-column:2}.pick-row>button{width:100%}.marketing-preview{min-height:430px}.order-kpis{grid-template-columns:repeat(2,1fr)}}

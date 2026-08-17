@@ -3,6 +3,9 @@
 const cfg = window.DMO_CONFIG || {};
 const app = document.getElementById('app');
 let apiBusyCount = 0;
+let publicLoadPromise = null;
+let adminLoadPromise = null;
+let productSearchCache = new WeakMap();
 
 const state = {
   page: location.hash === '#admin' ? 'admin' : 'shop',
@@ -14,6 +17,7 @@ const state = {
   seals: [],
   items: [],
   services: [],
+  moneyT: null,
   promotions: [],
   settings: {},
   cart: [],
@@ -59,6 +63,7 @@ const state = {
   offline: false,
   installPrompt: null,
   orderSuccess: null,
+  copyNotice: '',
   adminOrderFilter: 'ALL',
   adminOrderSearch: '',
   adminOrderMode: 'ACTIVE',
@@ -66,7 +71,12 @@ const state = {
   orderSubmitting: false,
   pendingOrderRequestId: '',
   pendingOrderFingerprint: '',
+  orderFormStartedAt: Date.now(),
+  orderCooldownUntil: Number(localStorage.getItem('dmo_order_cooldown_until') || 0),
   integrityReport: null,
+  catalogVisible: 60,
+  imageManager: { zipData: '', fileName: '', preview: null, applying: false, allowOverwrite: false },
+  publicLoadedAt: 0,
 };
 
 let inputRenderTimer = 0;
@@ -94,11 +104,14 @@ const searchText = (s) => String(s || '')
   .replace(/\s+/g, ' ')
   .trim();
 const searchTokens = (s) => searchText(s).split(' ').filter(Boolean);
-const searchFields = (product) => [
-  product.name, product.wikiName, product.wikiTitle, product.category,
-  product.section, product.itemCategory, product.serviceCategory,
-  product.tags, product.searchKeywords, ...(product.aliases || []),
-].filter(Boolean).map(searchText);
+const searchFields = (product) => {
+  if(productSearchCache.has(product))return productSearchCache.get(product);
+  const fields=[product.name, product.wikiName, product.wikiTitle, product.category,
+    product.section, product.itemCategory, product.serviceCategory,
+    product.tags, product.searchKeywords, ...(product.aliases || [])]
+    .filter(Boolean).map(searchText).map((text)=>({text,compact:norm(text)}));
+  productSearchCache.set(product,fields);return fields;
+};
 function editDistance(a, b) {
   a = searchText(a); b = searchText(b);
   if (!a) return b.length; if (!b) return a.length;
@@ -117,17 +130,22 @@ function smartSearchScore(product, rawQuery) {
   if (!query) return 1;
   const compact = norm(query);
   const tokens = searchTokens(query);
+  const hasNumericToken = /\d/.test(compact);
   const fields = searchFields(product);
   let best = 0;
-  fields.forEach((field, index) => {
-    const fCompact = norm(field);
+  fields.forEach((indexed, index) => {
+    const field=indexed.text,fCompact=indexed.compact;
     const primaryBoost = index === 0 ? 24 : index <= 2 ? 12 : 0;
     if (fCompact === compact) best = Math.max(best, 120 + primaryBoost);
     else if (fCompact.startsWith(compact)) best = Math.max(best, 92 + primaryBoost);
     else if (fCompact.includes(compact)) best = Math.max(best, 70 + primaryBoost);
-    const matchedTokens = tokens.filter((token) => field.includes(token) || fCompact.includes(norm(token))).length;
-    if (matchedTokens) best = Math.max(best, 38 + matchedTokens * 12 + primaryBoost);
-    if (compact.length >= 3 && fCompact.length <= 40) {
+    const fieldTokens = searchTokens(field);
+    const matchedTokens = tokens.filter((token) => /^\d+$/.test(token)
+      ? fieldTokens.includes(token)
+      : field.includes(token) || fCompact.includes(norm(token))).length;
+    if (matchedTokens === tokens.length) best = Math.max(best, 38 + matchedTokens * 12 + primaryBoost);
+    else if (tokens.length === 1 && matchedTokens) best = Math.max(best, 38 + primaryBoost);
+    if (!hasNumericToken && compact.length >= 3 && fCompact.length <= 40) {
       const distance = editDistance(compact, fCompact);
       const allowance = compact.length <= 5 ? 1 : compact.length <= 10 ? 2 : 3;
       if (distance <= allowance) best = Math.max(best, 52 - distance * 8 + primaryBoost);
@@ -149,6 +167,7 @@ function searchSuggestions() {
     .slice(0, 6).map((entry) => entry.product);
 }
 const html = (s) => String(s ?? '').replace(/[&<>'"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
+const safeExternalUrl=(value)=>{try{const url=new URL(String(value||''));return ['https:','http:'].includes(url.protocol)?url.toString():'';}catch(error){return'';}};
 const isVisible = (p) => !['HIDDEN', 'INACTIVE'].includes(String(p.status || 'ACTIVE'));
 const availableStock = (p) => p.availableStock !== undefined ? p.availableStock : (p.stock === '' ? '' : Math.max(0, Number(p.stock || 0) - Number(p.reservedStock || 0)));
 const canBuy = (p) => isVisible(p) && String(p.status) !== 'OUT_OF_STOCK' && !(availableStock(p) !== '' && availableStock(p) <= 0);
@@ -157,7 +176,7 @@ const productMaxQty = (p) => {
   return available === '' ? 9999 : Math.max(0, Math.floor(Number(available) || 0));
 };
 const stockLimitMessage = (p) => `มีสินค้าเหลือ ${money(productMaxQty(p))} ${saleUnit(p)}`;
-const allProducts = () => [...state.seals, ...state.items, ...state.services];
+const allProducts = () => [...state.seals, ...state.items, ...state.services, ...(state.moneyT ? [state.moneyT] : [])];
 const productKey = (product) => `${product.kind}|${product.id}`;
 const isFavorite = (product) => state.favoriteKeys.includes(productKey(product));
 function toggleFavorite(product) {
@@ -230,30 +249,26 @@ async function apiPost(payload) {
   }
 }
 
+function applyPublicData(data,offline=false){
+  state.seals=(data.seals||[]).map(product=>({...product,kind:'SEAL'})).filter(isVisible);
+  state.items=(data.gameItems||[]).map(product=>({...product,kind:'ITEM'})).filter(isVisible);
+  state.services=(data.services||[]).map(product=>({...product,kind:'SERVICE'})).filter(isVisible);
+  state.moneyT=data.moneyT?{...data.moneyT,kind:'TMONEY',unit:'T'}:null;
+  state.promotions=data.promotions||[];state.settings=data.settings||{};state.updatedAt=data.updatedAt||data.stockUpdatedAt||'';state.offline=offline;productSearchCache=new WeakMap();
+}
+function restorePublicCache(){
+  try{const cached=JSON.parse(localStorage.getItem('dmo_public_cache')||'null'),maxHours=Number((cached&&cached.data&&cached.data.settings&&cached.data.settings.offlineCacheHours)||state.settings.offlineCacheHours||12);if(cached&&cached.data&&Date.now()-Number(cached.savedAt||0)<=maxHours*3600000){applyPublicData(cached.data,true);return true;}}catch(error){}return false;
+}
 async function loadData(showLoading = true) {
-  try {
-    if (showLoading) {
-      state.loading = true;
-      render();
-    }
-    const data = await apiGet(false);
-    state.seals = (data.seals || []).map((product) => ({ ...product, kind: 'SEAL' })).filter(isVisible);
-    state.items = (data.gameItems || []).map((product) => ({ ...product, kind: 'ITEM' })).filter(isVisible);
-    state.services = (data.services || []).map((product) => ({ ...product, kind: 'SERVICE' })).filter(isVisible);
-    state.promotions = data.promotions || [];
-    state.settings = data.settings || {};
-    state.updatedAt = data.updatedAt || '';
-    state.offline = false;
-    try{localStorage.setItem('dmo_public_cache',JSON.stringify({savedAt:Date.now(),data}));}catch(e){}
-    state.loading = false;
-    render();
-  } catch (error) {
-    let restored=false;
-    try{const cached=JSON.parse(localStorage.getItem('dmo_public_cache')||'null');const maxHours=Number(state.settings.offlineCacheHours||12);if(cached&&cached.data&&Date.now()-Number(cached.savedAt||0)<=maxHours*3600000){const data=cached.data;state.seals=(data.seals||[]).map((product)=>({...product,kind:'SEAL'})).filter(isVisible);state.items=(data.gameItems||[]).map((product)=>({...product,kind:'ITEM'})).filter(isVisible);state.services=(data.services||[]).map((product)=>({...product,kind:'SERVICE'})).filter(isVisible);state.promotions=data.promotions||[];state.settings=data.settings||{};state.updatedAt=data.updatedAt||'';state.offline=true;restored=true;}}catch(e){}
-    state.loading = false;
-    render();
-    toast(restored?'ออฟไลน์: ใช้ข้อมูลล่าสุดที่บันทึกไว้':error.message);
-  }
+  if(publicLoadPromise)return publicLoadPromise;
+  const restored=showLoading&&restorePublicCache();
+  if(showLoading&&!restored){state.loading=true;render();}else if(restored){state.loading=false;render();}
+  publicLoadPromise=(async()=>{try{
+    const data=await apiGet(false);applyPublicData(data,false);state.publicLoadedAt=Date.now();
+    try{localStorage.setItem('dmo_public_cache',JSON.stringify({savedAt:Date.now(),data}));}catch(error){}
+    state.loading=false;render();
+  }catch(error){const cacheAvailable=restored||restorePublicCache();state.loading=false;render();toast(cacheAvailable?'ออฟไลน์: ใช้ข้อมูลล่าสุดที่บันทึกไว้':error.message);}finally{publicLoadPromise=null;}})();
+  return publicLoadPromise;
 }
 
 function customerNav() {
@@ -261,6 +276,7 @@ function customerNav() {
     ['SEAL', '🦖 ซีล'],
     ['ITEM', '🎒 ไอเทม'],
     ['SERVICE', '⚔️ บริการ'],
+    ['TMONEY', '💰 เงิน T'],
   ];
   return `<nav class="nav customer-nav">
     ${types.map(([value, label]) => `<button class="tab ${state.catalogType === value && !state.wishlistOnly ? 'active' : ''}" data-type="${value}">${label}</button>`).join('')}
@@ -278,7 +294,7 @@ function applyAdminRoleGuards(){
   if(state.page!=='admin'||!state.adminToken)return;
   const role=String(state.adminUser?.role||'VIEWER').toUpperCase();
   const disable=(selectors)=>document.querySelectorAll(selectors.join(',')).forEach((el)=>{el.disabled=true;el.setAttribute('aria-disabled','true');el.title='บัญชี '+role+' ไม่มีสิทธิ์แก้ไขส่วนนี้';});
-  const adminOnly=['[data-new]','[data-edit]','[data-delete]','#saveRecordBtn','#bulkApplyBtn','#bulkTrashBtn','[data-restore-trash]','[data-delete-trash]','#saveSettingsBtn','#savePromotionBtn','[data-edit-promotion]','[data-delete-promotion]','#wikiGalleryBtn','#wikiCenterRecordBtn','[data-wiki-import]','[data-attach-wiki]'];
+  const adminOnly=['[data-new]','[data-edit]','[data-delete]','#saveRecordBtn','#bulkApplyBtn','#bulkTrashBtn','[data-restore-trash]','[data-delete-trash]','#saveSettingsBtn','#savePromotionBtn','[data-edit-promotion]','[data-delete-promotion]','#wikiGalleryBtn','#wikiCenterRecordBtn','[data-wiki-import]','[data-attach-wiki]','#imageZipInput','#previewImageZipBtn','#applyImageZipBtn'];
   const staffWrite=['[data-save-order]','[data-pick-item]','[data-save-customer]','#saveCrmCustomerBtn','#addInteractionBtn'];
   const stockAdminOnly=['[data-stock-adjust]','[data-stock-set]','#stockAddBtn','#syncStockBtn'];
   const ownerOnly=['#saveSecurityUserBtn','#toggleBackupTriggerBtn','[data-restore-backup]','[data-delete-backup]'];
@@ -305,7 +321,7 @@ function render() {
     ${adminMode ? '' : customerNav()}
     ${state.orderSuccess && !adminMode ? orderSuccessPanel() : ''}
     ${state.loading ? '<section class="panel empty"><span class="loading"></span> กำลังโหลดข้อมูล...</section>' : (adminMode ? adminPage() : shopPage())}
-    ${adminMode ? '' : `<nav class="mobile-bottom-nav"><button data-mobile-nav="SEAL">🦖<span>ซีล</span></button><button data-mobile-nav="ITEM">🎒<span>ไอเทม</span></button><button id="mobileCartBtn">🛒<span>ตะกร้า ${state.cart.reduce((s,x)=>s+Number(x.quantity||0),0)}</span></button><button id="mobileAdminBtn">🔒<span>Admin</span></button></nav><footer class="site-footer"><span>GUN SHOP DMO • เจ้าของร้าน Natthananat Kawinwatthanakorn • รูปภาพอ้างอิงจาก <a href="https://dmowiki.com/Seal_Master" target="_blank" rel="noopener">DMO Wiki</a></span><button class="admin-entry" id="adminEntry">🔒 ระบบหลังบ้าน</button></footer>`}
+    ${adminMode ? '' : `<nav class="mobile-bottom-nav"><button data-mobile-nav="SEAL">🦖<span>ซีล</span></button><button data-mobile-nav="ITEM">🎒<span>ไอเทม</span></button><button data-mobile-nav="SERVICE">⚔️<span>บริการ</span></button><button data-mobile-nav="TMONEY">💰<span>เงิน T</span></button><button id="mobileCartBtn">🛒<span>ตะกร้า ${state.cart.reduce((s,x)=>s+Number(x.quantity||0),0)}</span></button></nav><footer class="site-footer"><span>GUN SHOP DMO • เจ้าของร้าน Natthananat Kawinwatthanakorn • รูปภาพอ้างอิงจาก <a href="https://dmowiki.com/Seal_Master" target="_blank" rel="noopener">DMO Wiki</a></span><button class="admin-entry" id="adminEntry">🔒 ระบบหลังบ้าน</button></footer>`}
   `;
   bind();
   applyAdminRoleGuards();
@@ -315,6 +331,7 @@ function catalog() {
   if (state.wishlistOnly) return allProducts();
   if (state.catalogType === 'ITEM') return state.items;
   if (state.catalogType === 'SERVICE') return state.services;
+  if (state.catalogType === 'TMONEY') return state.moneyT ? [state.moneyT] : [];
   return state.seals;
 }
 
@@ -345,19 +362,25 @@ function sectionLabel(section) {
   return ({ NORMAL: 'ปกติ', BASE_HARD: 'เบสยาก', SUSA: 'ซูซา' })[section] || section || '';
 }
 
-function saleUnit(product){return product.kind==='SEAL'?(product.section==='SUSA'?'ใบ':'ชุด'):(product.unit||'ชิ้น');}
-function sealSaleNote(product){if(product.kind!=='SEAL')return'';return product.section==='SUSA'?'ราคาต่อ 1 ใบ':`1 ชุด = ${money(product.packSize||1000)} ใบ`;}
+function saleUnit(product){return String(product.unit||(product.kind==='SEAL'?'ชุด':product.kind==='SERVICE'?'ครั้ง':product.kind==='TMONEY'?'T':'ชิ้น'));}
+function formatProductPrice(product){const unit=saleUnit(product),pack=Number(product.packSize)||1000;return `${money(product.price)} บาท/${html(unit)}${unit==='ชุด'?` (${money(pack)} ใบ)`:''}`;}
+function sealSaleNote(product){if(product.kind!=='SEAL')return'';return saleUnit(product)==='ชุด'?`1 ชุด = ${money(product.packSize||1000)} ใบ`:'ราคาต่อ 1 ใบ';}
 
 function productMeta(product) {
-  if (product.kind === 'SEAL') return `${product.category} • ${sectionLabel(product.section)} • ${money(product.price)} บาท/${saleUnit(product)} • ${sealSaleNote(product)}`;
-  if (product.kind === 'SERVICE') return `${html(product.serviceCategory || 'บริการ')} • ${money(product.price)} บาท/${html(product.unit || 'ครั้ง')}`;
-  return `${html(product.itemCategory || 'ไอเทม')} • ${money(product.price)} บาท/${html(product.unit || 'ชิ้น')}`;
+  if (product.kind === 'SEAL') return `${product.category} • ${sectionLabel(product.section)} • ${formatProductPrice(product)}`;
+  if (product.kind === 'SERVICE') return `${html(product.serviceCategory || 'บริการ')} • ${formatProductPrice(product)}`;
+  if (product.kind === 'TMONEY') return `กำหนดจำนวน T ที่ต้องการ • Rate ${formatProductPrice(product)}`;
+  return `${html(product.itemCategory || 'ไอเทม')} • ${formatProductPrice(product)}`;
+}
+
+function productFallbackIcon(product){return product.kind==='SEAL'?'🦖':product.kind==='SERVICE'?'⚔️':product.kind==='TMONEY'?'💰':'🎒';}
+function productImageMarkup(product,className='product-img'){
+  const fallback=`<span class="image-fallback" aria-hidden="true">${productFallbackIcon(product)}</span>`;
+  return product.imageUrl?`<span class="product-image-frame">${fallback}<img class="${className}" src="${html(product.imageUrl)}" alt="${html(product.name)}" loading="lazy" decoding="async" fetchpriority="low" onerror="this.hidden=true;this.parentElement.classList.add('is-broken')"></span>`:`<span class="product-image-frame is-empty">${fallback}</span>`;
 }
 
 function productCard(product) {
-  const image = product.imageUrl
-    ? `<img class="product-img" src="${html(product.imageUrl)}" alt="${html(product.name)}" loading="lazy" onerror="this.classList.add('image-error');this.removeAttribute('src')">`
-    : `<div class="product-img placeholder"><span>${product.kind === 'SEAL' ? '🦖' : product.kind === 'SERVICE' ? '⚔️' : '🎒'}</span></div>`;
+  const image=productImageMarkup(product);
   const description = product.description ? `<div class="product-description">${html(product.description)}</div>` : '';
   return `<article class="product-card">
     <div class="image-wrap">${image}<button class="favorite-btn ${isFavorite(product) ? 'active' : ''}" data-favorite="${html(productKey(product))}" aria-label="รายการโปรด">${isFavorite(product) ? '♥' : '♡'}</button></div>
@@ -370,7 +393,7 @@ function productCard(product) {
       ${product.wikiUrl ? `<a class="wiki-link" href="${html(product.wikiUrl)}" target="_blank" rel="noopener">📚 ดูข้อมูล DMO Wiki</a>` : ''}
     </div>
     <div class="product-actions">
-      <input class="qty-input" type="number" min="1" max="${productMaxQty(product)}" step="1" value="1" data-qty="${html(product.id)}" ${canBuy(product) ? '' : 'disabled'}>
+      <input class="qty-input" type="number" min="1" max="${productMaxQty(product)}" step="1" value="1" data-qty="${html(product.id)}" aria-label="${product.kind==='TMONEY'?'จำนวน T':'จำนวนสินค้า'}" ${canBuy(product) ? '' : 'disabled'}>
       <button class="btn primary small" data-add="${html(product.id)}" ${canBuy(product) ? '' : 'disabled'}>+ เพิ่ม</button>
     </div>
   </article>`;
@@ -378,19 +401,21 @@ function productCard(product) {
 
 function shopPage() {
   const products = filteredProducts();
+  const visibleProducts=products.slice(0,state.catalogVisible);
   const suggestions = state.search && !state.selectedSearchKey ? searchSuggestions() : [];
-  const servicePoster = state.catalogType === 'SERVICE' ? state.services.find((product) => product.imageUrl) : null;
+  const servicePosterUrl=state.catalogType==='SERVICE'?safeExternalUrl(state.settings.servicePosterUrl):'';
   return `<div class="grid-main">
     <section class="panel">
-      <div class="shop-heading"><div><h2 class="panel-title">${state.wishlistOnly ? '❤️ รายการโปรด' : state.catalogType === 'SEAL' ? 'รายการซีล' : state.catalogType === 'ITEM' ? 'ไอเทมในเกม' : 'บริการของร้าน'}</h2><p class="product-meta">${state.wishlistOnly ? 'รายการโปรดเก็บอยู่ในอุปกรณ์เครื่องนี้' : 'เลือกจำนวนและเพิ่มลงรายการ จากนั้นส่งให้ร้านตรวจสอบสต๊อก'}</p></div></div>
+      <div class="shop-heading"><div><h2 class="panel-title">${state.wishlistOnly ? '❤️ รายการโปรด' : state.catalogType === 'SEAL' ? 'รายการซีล' : state.catalogType === 'ITEM' ? 'ไอเทมในเกม' : state.catalogType === 'TMONEY' ? 'เงิน T' : 'บริการของร้าน'}</h2><p class="product-meta">${state.wishlistOnly ? 'รายการโปรดเก็บอยู่ในอุปกรณ์เครื่องนี้' : state.catalogType==='TMONEY'?'กรอกจำนวน T ที่ต้องการ ระบบคำนวณจาก Rate ปัจจุบันและตรวจ Stock จริงอีกครั้งที่ Server':'เลือกจำนวนและเพิ่มลงรายการ จากนั้นส่งให้ร้านตรวจสอบสต๊อก'}</p></div></div>
+      <div class="commerce-flow" aria-label="ขั้นตอนสั่งซื้อ"><b>1 เลือกสินค้า</b><i>→</i><b>2 ตรวจตะกร้า</b><i>→</i><b>3 Copy/ส่งให้ร้าน</b><i>→</i><b>4 ร้านตรวจและจัดของ</b><i>→</i><b>5 เสร็จสิ้น</b></div>
       <div class="filters">
         <div class="smart-search-wrap"><input class="search" id="searchInput" autocomplete="off" placeholder="ค้นหาชื่อ Alias สาย หรือพิมพ์คลาดเคลื่อนได้..." value="${html(state.search)}">${state.search ? `<button class="search-clear" id="searchClearBtn">×</button>` : ''}${suggestions.length ? `<div class="search-suggestions">${suggestions.map((p)=>`<button data-search-suggestion="${html(p.name)}" data-search-product="${html(productKey(p))}"><b>${html(p.name)}</b><span>${html(productMeta(p))}</span></button>`).join('')}</div>` : ''}</div>
         ${state.recentSearches.length ? `<div class="recent-searches"><span>ค้นหาล่าสุด:</span>${state.recentSearches.map((q)=>`<button data-recent-search="${html(q)}">${html(q)}</button>`).join('')}<button id="clearRecentSearches">ล้าง</button></div>` : ''}
         ${state.catalogType === 'SEAL' ? `<div class="chip-row">${['ALL', 'AT', 'HT', 'CT', 'HP', 'DS', 'DE', 'EV', 'BL'].map((category) => `<button class="filter-chip ${state.category === category ? 'active' : ''}" data-cat="${category}">${category === 'ALL' ? 'ทั้งหมด' : category}</button>`).join('')}</div>
         <div class="chip-row">${[['ALL', 'ทุกประเภท'], ['NORMAL', 'ปกติ'], ['BASE_HARD', 'เบสยาก'], ['SUSA', 'ซูซา']].map(([value, label]) => `<button class="filter-chip ${state.section === value ? 'active' : ''}" data-sec="${value}">${label}</button>`).join('')}</div>` : ''}
       </div>
-      ${servicePoster ? `<div class="service-poster"><img src="${html(servicePoster.imageUrl)}" alt="${html(servicePoster.name)}"><div><span>บริการจาก GUN SHOP DMO</span><strong>${html(servicePoster.name)}</strong><small>${html(servicePoster.description || 'เลือกบริการและเพิ่มลงตะกร้าได้จากรายการด้านล่าง')}</small></div></div>` : ''}
-      <div class="search-summary">พบ ${products.length} รายการ${state.search ? ` สำหรับ “${html(state.search)}”` : ''}</div><div class="products">${products.length ? products.map(productCard).join('') : '<div class="empty">ไม่พบสินค้า ลองตรวจคำสะกดหรือค้นด้วยชื่ออังกฤษ/ชื่อเรียกอื่น</div>'}</div>
+      ${servicePosterUrl?`<div class="service-poster"><img src="${html(servicePosterUrl)}" alt="โปสเตอร์บริการ GUN SHOP DMO" loading="lazy" decoding="async" onerror="this.closest('.service-poster').hidden=true"></div>`:''}
+      <div class="search-summary">พบ ${products.length} รายการ${state.search ? ` สำหรับ “${html(state.search)}”` : ''}${products.length>visibleProducts.length?` • แสดง ${visibleProducts.length} รายการแรก`:''}</div><div class="products">${products.length ? visibleProducts.map(productCard).join('') : '<div class="empty"><b>ไม่พบสินค้า</b><span>ลองตรวจคำสะกด เปลี่ยนหมวด หรือค้นด้วยชื่อเรียกอื่น</span><button class="btn small" id="emptyResetBtn">ล้างการค้นหา</button></div>'}</div>${products.length>visibleProducts.length?`<button class="btn load-more" id="loadMoreProductsBtn">แสดงเพิ่มอีก ${Math.min(60,products.length-visibleProducts.length)} รายการ</button>`:''}
     </section>
     ${cartPanel()}
   </div>`;
@@ -399,8 +424,9 @@ function shopPage() {
 function cartItem(item) {
   const product = allProducts().find((entry) => entry.id === item.id && entry.kind === item.kind);
   const atLimit = product && item.quantity >= productMaxQty(product);
+  const displayProduct=product||item;
   return `<div class="cart-item">
-    <div><b>${html(item.name)}</b><div class="product-meta">${money(item.quantity)} ${html(item.unit)} × ${money(item.price)} = ${money(item.quantity * item.price)} บาท</div></div>
+    <div><b>${html(item.name)}</b><div class="product-meta">${money(item.quantity)} ${html(saleUnit(displayProduct))} × ${formatProductPrice(displayProduct)} = ${money(item.quantity * item.price)} บาท</div></div>
     <div class="cart-controls"><button class="btn small" data-dec="${html(item.id)}">−</button><b>${money(item.quantity)}</b><button class="btn small" data-inc="${html(item.id)}" ${atLimit ? 'disabled' : ''}>+</button><button class="btn danger small" data-remove="${html(item.id)}" style="grid-column:1/-1">ลบ</button></div>
   </div>`;
 }
@@ -420,7 +446,7 @@ function pricingSummary(){
     const min=Number(p.minSpend)||0;if(subtotal<min)continue;
     if(p.type==='DISCOUNT_PERCENT'||p.type==='FLASH_SALE'){const d=subtotal*(Math.max(0,Math.min(100,Number(p.value)||0))/100);discount+=d;messages.push(`${p.name}: ลด ${money(d)} บาท`);}
     else if(p.type==='DISCOUNT_AMOUNT'){const d=Math.min(subtotal,Math.max(0,Number(p.value)||0));discount+=d;messages.push(`${p.name}: ลด ${money(d)} บาท`);}
-    else if(p.type==='REWARD_PER_SPEND'){const step=Number(p.minSpend)||100,reward=Number(p.value)||0,count=Math.floor(sealSubtotal/step);if(count>0)messages.push(`${p.name}: ได้รับ ${money(count*reward)} D2 จากยอดซีล ${money(sealSubtotal)} บาท`);}
+    else if(p.type==='REWARD_PER_SPEND')continue;
     else if(p.rewardText)messages.push(p.rewardText);
     if(String(p.stackable)==='FALSE')break;
   }
@@ -435,6 +461,7 @@ function cartPanel() {
   const threshold = Number(state.settings.promoThreshold) || 100;
   const promotionSets = Math.floor(pricing.sealSubtotal / threshold);
   const remaining = pricing.sealSubtotal ? threshold - (pricing.sealSubtotal % threshold) : threshold;
+  const submitCooldown=Math.max(0,Math.ceil((Number(state.orderCooldownUntil||0)-Date.now())/1000));
   return `<aside class="panel cart-panel">
     <h2 class="panel-title">🛒 รายการที่เลือก (${state.cart.length})</h2>
     <div class="checkout-steps"><span class="done"><b>1</b> เลือกสินค้า</span><span class="${state.cart.length ? 'active' : ''}"><b>2</b> กรอกข้อมูล</span><span><b>3</b> รับเลขออเดอร์</span></div>
@@ -445,10 +472,13 @@ function cartPanel() {
       <input id="tamer" placeholder="ชื่อเทมเมอร์" value="${html(state.customer.tamer)}">
       <div class="security-note">🌐 ให้บริการเฉพาะเซิร์ฟเวอร์ ลิเวียมอน</div>
       <input id="contact" placeholder="ชื่อ Facebook" value="${html(state.customer.contact)}">
-      <details class="customer-help"><summary>📖 วิธีส่งรายการให้ร้านทาง Facebook</summary><ol><li>เลือกสินค้าและตรวจจำนวนให้ถูกต้อง</li><li>กรอกชื่อเทมเมอร์และชื่อ Facebook</li><li>กด “ส่งรายการให้ร้านตรวจสอบ” และรอเลขออเดอร์</li><li>กด “คัดลอกข้อความ” แล้วเปิด Facebook ของร้าน</li><li>วางข้อความในแชตและส่ง จากนั้นรอร้านยืนยันสต๊อกและยอดก่อนโอนเงิน</li></ol></details>
+      <input class="order-honeypot" id="orderWebsite" name="website" autocomplete="off" tabindex="-1" aria-hidden="true">
+      <details class="customer-help"><summary>📖 วิธีส่งรายการให้ร้านทาง Facebook</summary><ol><li>เลือกสินค้าและตรวจจำนวนให้ถูกต้อง</li><li>กรอกชื่อเทมเมอร์และชื่อ Facebook</li><li>กด “คัดลอกรายการเพื่อส่งให้ร้าน”</li><li>เปิด Facebook/Messenger ของร้าน แล้ววางข้อความในแชต</li><li>รอร้านตรวจสอบสต๊อกและยืนยันยอดก่อนโอนเงิน</li></ol></details>
       ${state.recentOrders.length?`<details class="customer-help"><summary>🕘 รายการล่าสุดของฉัน (${state.recentOrders.length})</summary><div class="recent-order-list">${state.recentOrders.map((o,i)=>`<div><span>${html(o.orderId||'ยังไม่มีเลขออเดอร์')} • ${money(o.total)} บาท</span><button class="btn small" data-repeat-order="${i}">ซื้อซ้ำ</button></div>`).join('')}</div></details>`:''}
-      <button class="btn success" id="saveOrderBtn" ${state.cart.length && !state.orderSubmitting ? '' : 'disabled'}>${state.orderSubmitting ? '⏳ กำลังส่งออเดอร์...' : '✅ ส่งรายการให้ร้านตรวจสอบ'}</button>
-      <button class="btn primary" id="copyOnlyBtn" ${state.cart.length ? '' : 'disabled'}>📋 คัดลอกข้อความ</button>
+      <button class="btn success copy-order-primary" id="copyOnlyBtn" ${state.cart.length ? '' : 'disabled'}>📋 คัดลอกรายการเพื่อส่งให้ร้าน</button>
+      ${state.copyNotice?`<div class="copy-success" role="status">${html(state.copyNotice)}</div>`:''}
+      ${safeExternalUrl(state.settings.facebookUrl)?`<a class="btn facebook-btn" href="${html(safeExternalUrl(state.settings.facebookUrl))}" target="_blank" rel="noopener">💬 เปิด Facebook / Messenger ของร้าน</a>`:''}
+      <button class="btn" id="saveOrderBtn" ${state.cart.length && !state.orderSubmitting && !submitCooldown ? '' : 'disabled'}>${state.orderSubmitting ? '⏳ กำลังส่งออเดอร์...' : submitCooldown?`รอ ${submitCooldown} วินาทีก่อนส่งออเดอร์ใหม่`:'ส่งรายการเข้าระบบหลังร้าน'}</button>
       <button class="btn" id="favoriteCartBtn" ${state.cart.length ? '' : 'disabled'}>❤️ บันทึกทั้งหมดเป็นรายการโปรด</button><button class="btn danger" id="clearCartBtn" ${state.cart.length ? '' : 'disabled'}>ล้างรายการ</button>
     </div>
   </aside>`;
@@ -457,6 +487,7 @@ function cartPanel() {
 function addToCart(id, quantity) {
   const product = allProducts().find((entry) => entry.id === id);
   if (!product) return;
+  state.copyNotice='';
   quantity = Math.max(1, Math.floor(Number(quantity) || 1));
   const existing = state.cart.find((entry) => entry.id === id);
   const nextQuantity = (existing ? existing.quantity : 0) + quantity;
@@ -466,9 +497,11 @@ function addToCart(id, quantity) {
     return;
   }
   if (existing) existing.quantity = nextQuantity;
-  else state.cart.push({ id: product.id, name: product.name, price: Number(product.price) || 0, unit: saleUnit(product), kind: product.kind, quantity });
+  else state.cart.push(cartProductSnapshot(product,quantity));
   render();
 }
+
+function cartProductSnapshot(product,quantity){return{id:product.id,name:product.name,price:Number(product.price)||0,unit:saleUnit(product),kind:product.kind,category:product.category||'',section:product.section||'',packSize:Number(product.packSize)||0,quantity};}
 
 function orderText(customer = {}) {
   const pricing = pricingSummary();
@@ -476,7 +509,19 @@ function orderText(customer = {}) {
   const threshold = Number(state.settings.promoThreshold) || 100;
   const promotionSets = Math.floor(pricing.sealSubtotal / threshold);
   const remaining = pricing.sealSubtotal ? threshold - (pricing.sealSubtotal % threshold) : threshold;
-  return `🛒 รายการสั่งซื้อ DMO\n\n${state.cart.map((item) => `${item.name} ${money(item.quantity)} ${item.unit} — ${money(item.price * item.quantity)} บาท`).join('\n')}\n\n${pricing.discount>0?`ยอดสินค้า ${money(pricing.subtotal)} บาท\nส่วนลด ${money(pricing.discount)} บาท\n`:''}รวมทั้งหมด ${money(total)} บาท${pricing.messages.length?`\n\nโปรโมชั่นอื่น:\n${pricing.messages.join('\n')}`:''}\n\nยอดซีลที่ร่วมโปร D2: ${money(pricing.sealSubtotal)} บาท\n${promotionSets > 0 ? `โปรโมชั่น D2: ได้รับ ${money(promotionSets * (Number(state.settings.promoReward) || 150))} อัน` : `โปรโมชั่น D2: ยังไม่ได้รับ\nซื้อซีลเพิ่มเพื่อรับ D2: ${money(remaining)} บาท`}\n\nชื่อเทมเมอร์: ${customer.tamer || '__________'}\nเซิร์ฟเวอร์: ${customer.server || '__________'}\nช่องทางติดต่อ: ${customer.contact || '__________'}\n\n⚠️ ${state.settings.orderNotice || 'รายการนี้ยังไม่ใช่การยืนยันคำสั่งซื้อ กรุณารอร้านตรวจสอบสต๊อกและยืนยันยอดก่อนโอน'}`;
+  const productByKey=new Map(allProducts().map(p=>[productKey(p),p])),groups={SERVICE:[],ITEM:[],SEAL:[],TMONEY:[]},sealOrder={AT:0,HT:1,CT:2,HP:3,DS:4,DE:5,EV:6,BL:7};
+  state.cart.forEach(item=>{const product=productByKey.get(`${item.kind}|${item.id}`)||item;(groups[item.kind]||groups.ITEM).push({...item,...product,quantity:item.quantity,price:item.price});});
+  groups.SEAL.sort((a,b)=>(sealOrder[a.category]??99)-(sealOrder[b.category]??99)||String(a.name).localeCompare(String(b.name),'th'));
+  const lines=['🛒 รายการสั่งซื้อ DMO'];
+  const normalLine=item=>`${item.name} ${money(item.quantity)} ${saleUnit(item)} — ${money(item.price*item.quantity)} บาท`;
+  if(groups.SERVICE.length)lines.push('', '⚔️ บริการ',...groups.SERVICE.map(normalLine));
+  if(groups.ITEM.length)lines.push('', '🎒 ไอเทม',...groups.ITEM.map(normalLine));
+  if(groups.SEAL.length){lines.push('', '🦖 ซีล');let last='';groups.SEAL.forEach(item=>{if(item.category!==last){lines.push('',item.category||'ไม่ระบุสาย');last=item.category;}lines.push(normalLine(item));});}
+  if(groups.TMONEY.length)lines.push('', '💰 เงิน T',...groups.TMONEY.map(item=>`${money(item.quantity)}T × ${money(item.price)} บาท — ${money(item.price*item.quantity)} บาท`));
+  lines.push('',...(pricing.discount>0?[`ยอดสินค้า ${money(pricing.subtotal)} บาท`,`ส่วนลด ${money(pricing.discount)} บาท`]:[]),`รวมทั้งหมด ${money(total)} บาท`);
+  if(pricing.messages.length)lines.push('', 'โปรโมชั่นอื่น:',...pricing.messages);
+  lines.push('', '🎁 โปรโมชั่น D2 (คิดเฉพาะซีล)',`ยอดซีลที่ร่วมโปร D2: ${money(pricing.sealSubtotal)} บาท`,promotionSets>0?`ได้รับ D2: ${money(promotionSets*(Number(state.settings.promoReward)||150))} อัน`:`ซื้อซีลเพิ่มอีก ${money(remaining)} บาทเพื่อรับ D2`,'',`ชื่อเทมเมอร์: ${customer.tamer||'__________'}`,`เซิร์ฟเวอร์: ${customer.server||'ลิเวียมอน'}`,`ช่องทางติดต่อ: ${customer.contact||'__________'}`,'',`⚠️ ${state.settings.orderNotice||'รายการนี้ยังไม่ใช่การยืนยันคำสั่งซื้อ กรุณารอร้านตรวจสอบสต๊อกและยืนยันยอดก่อนโอน'}`);
+  return lines.join('\n');
 }
 
 async function copyText(text,message='คัดลอกข้อความแล้ว') {
@@ -498,17 +543,19 @@ function orderSuccessPanel(){
 function adminPage() {
   if (!state.adminToken) return `<section class="panel login-box"><h2 class="panel-title">เข้าสู่ระบบร้าน</h2><p class="product-meta">ข้อมูลหลังบ้านทั้งหมดอยู่ภายในหน้านี้</p><div class="stack"><input id="adminId" placeholder="ไอดี" ${state.loginSubmitting?'disabled':''}><input id="adminPassword" type="password" placeholder="รหัสผ่าน" ${state.loginSubmitting?'disabled':''}><button class="btn primary" id="loginBtn" ${state.loginSubmitting?'disabled':''}>${state.loginSubmitting?'<span class="loading"></span> กำลังตรวจสอบบัญชี...':'เข้าสู่ระบบ'}</button>${state.loginSubmitting?'<div class="product-meta">รับคำขอแล้ว กรุณารอสักครู่ ไม่ต้องกดซ้ำ</div>':''}<button class="btn" id="backShopBtn" ${state.loginSubmitting?'disabled':''}>← กลับหน้าร้าน</button></div></section>`;
   if (!state.adminData) return `<section class="panel empty"><span class="loading"></span> เข้าสู่ระบบสำเร็จ กำลังโหลดข้อมูลหลังร้าน...</section>`;
-  const views = [['dashboard', '📊 ภาพรวม'], ['catalog', '📦 สินค้า'], ['inventory', '🏬 สต๊อก'], ['analytics', '📈 วิเคราะห์'], ['reports', '📤 รายงาน'], ['orders', '🧾 ออเดอร์'], ['customers', '👥 CRM ลูกค้า'], ['promotions', '🎁 โปรโมชั่น'], ['wiki', '📚 DMO Wiki'], ['trash', '🗑️ ถังขยะ'], ['calculator', '🧮 คำนวณ'], ['settings', '⚙️ ตั้งค่า'], ['security', '🛡️ ความปลอดภัย'], ['integrity', '🧪 ตรวจข้อมูล'], ['automation', '🤖 Automation'], ['logs', '🕘 ประวัติ']];
+  const views = [['dashboard', '📊 ภาพรวม'], ['catalog', '📦 สินค้า'], ['images', '🖼️ จัดการรูป'], ['inventory', '🏬 สต๊อก'], ['analytics', '📈 วิเคราะห์'], ['reports', '📤 รายงาน'], ['orders', '🧾 ออเดอร์'], ['marketing', '📣 สร้างโพสต์'], ['customers', '👥 CRM ลูกค้า'], ['promotions', '🎁 โปรโมชั่น'], ['wiki', '📚 DMO Wiki'], ['trash', '🗑️ ถังขยะ'], ['calculator', '🧮 คำนวณ'], ['settings', '⚙️ ตั้งค่า'], ['security', '🛡️ ความปลอดภัย'], ['integrity', '🧪 ตรวจข้อมูล'], ['automation', '🤖 Automation'], ['logs', '🕘 ประวัติ']];
   return `<div class="admin-toolbar"><div class="chip-row">${views.map(([value, label]) => `<button class="filter-chip ${state.adminView === value ? 'active' : ''}" data-admin-view="${value}">${label}</button>`).join('')}</div><div><span class="badge green">${html((state.adminUser&&state.adminUser.role)||'ADMIN')}</span> <button class="btn" id="backShopBtn">หน้าร้าน</button> <button class="btn danger" id="logoutBtn">ออกจากระบบ</button></div></div>${adminContent()}${state.editRecord !== null ? editModal() : ''}${state.wikiGallery ? wikiGalleryModal() : ''}`;
 }
 
 function adminContent() {
   if (state.adminView === 'catalog') return adminCatalog();
+  if (state.adminView === 'images') return imageManagementPage();
   if (state.adminView === 'inventory') return inventoryPage();
   if (state.adminView === 'calculator') return calculatorPage();
   if (state.adminView === 'analytics') return analyticsPage();
   if (state.adminView === 'reports') return reportsPage();
   if (state.adminView === 'orders') return adminOrders();
+  if (state.adminView === 'marketing') return facebookPostGenerator();
   if (state.adminView === 'customers') return adminCustomers();
   if (state.adminView === 'promotions') return adminPromotions();
   if (state.adminView === 'settings') return adminSettings();
@@ -522,7 +569,7 @@ function adminContent() {
 }
 
 function dashboardPage() {
-  const all = [...(state.adminData?.seals || []), ...(state.adminData?.gameItems || []), ...(state.adminData?.services || [])];
+  const all = [...(state.adminData?.seals || []), ...(state.adminData?.gameItems || []), ...(state.adminData?.services || []), ...(state.adminData?.moneyT ? [state.adminData.moneyT] : [])];
   const active = all.filter((x) => x.status === 'ACTIVE').length;
   const check = all.filter((x) => x.status === 'CHECK_STOCK').length;
   const out = all.filter((x) => x.status === 'OUT_OF_STOCK' || (x.stock !== '' && Number(x.stock) <= 0)).length;
@@ -549,7 +596,7 @@ function calculatorPage() {
 function parseCalculator(text) {
   const found = [], missing = [];
   String(text || '').split(/\n+/).map((line) => line.trim()).filter(Boolean).forEach((line) => {
-    const match = line.match(/^(.*?)(?:\s+x?\s*)(\d+(?:\.\d+)?)\s*(?:ชุด|ใบ|ชิ้น|ครั้ง)?$/i);
+    const match = line.match(/^(.*?)(?:\s+x?\s*)(\d+(?:\.\d+)?)\s*(?:ชุด|ใบ|ชิ้น|ครั้ง|T)?$/i);
     const name = match ? match[1].trim() : line;
     const quantity = match ? Number(match[2]) : 1;
     const search = norm(name);
@@ -564,7 +611,7 @@ function parseCalculator(text) {
 
 function calcText(parsed) {
   const total = parsed.found.reduce((sum, entry) => sum + Number(entry.p.price) * entry.qty, 0);
-  const lines = parsed.found.map((entry) => `${entry.p.name} ${money(entry.qty)} ${entry.p.unit} — ${money(entry.p.price * entry.qty)} บาท`);
+  const lines = parsed.found.map((entry) => `${entry.p.name} ${money(entry.qty)} ${saleUnit(entry.p)} × ${formatProductPrice(entry.p)} — ${money(entry.p.price * entry.qty)} บาท`);
   if (parsed.missing.length) lines.push('', 'ไม่พบ/ชื่อซ้ำ:', ...parsed.missing.map((line) => `• ${line}`));
   lines.push('', `รวม ${money(total)} บาท`);
   return lines.join('\n');
@@ -572,7 +619,7 @@ function calcText(parsed) {
 
 
 function inventoryPage() {
-  const products = [...(state.adminData.seals || []), ...(state.adminData.gameItems || [])];
+  const products = [...(state.adminData.seals || []), ...(state.adminData.gameItems || []), ...(state.adminData.moneyT ? [state.adminData.moneyT] : [])];
   const role=String(state.adminData?.security?.actor?.role||state.adminUser?.role||'VIEWER').toUpperCase(),canEdit=['OWNER','ADMIN'].includes(role);
   const query = norm(state.inventorySearch);
   const filtered = products.filter((product) => {
@@ -620,24 +667,40 @@ function inventoryRow(product) {
 
 function adminCatalog() {
   const query = norm(state.adminCatalogSearch);
-  const all = [...(state.adminData.seals || []), ...(state.adminData.gameItems || []), ...(state.adminData.services || [])]
+  const all = [...(state.adminData.seals || []), ...(state.adminData.gameItems || []), ...(state.adminData.services || []), ...(state.adminData.moneyT ? [state.adminData.moneyT] : [])]
     .filter((p) => state.adminKindFilter === 'ALL' || p.kind === state.adminKindFilter)
     .filter((p) => !query || [p.name, p.category, p.section, p.itemCategory, p.serviceCategory, ...(p.aliases || [])].map(norm).some((x) => x.includes(query)))
     .sort((a, b) => String(a.kind).localeCompare(String(b.kind)) || (Number(a.sortOrder) || 9999) - (Number(b.sortOrder) || 9999));
   const selectedCount = state.adminSelected.length;
   return `<section class="panel">
     <div class="admin-toolbar"><div><h2 class="panel-title">Admin 2.0 — จัดการสินค้า (${all.length})</h2><p class="product-meta">ค้นหา เลือกหลายรายการ แก้พร้อมกัน และลบลงถังขยะโดยกู้คืนได้</p></div><div class="chip-row"><button class="btn primary" data-new="SEAL">+ ซีล</button><button class="btn primary" data-new="ITEM">+ ไอเทม</button><button class="btn primary" data-new="SERVICE">+ บริการ</button></div></div>
-    <div class="admin-catalog-tools"><input id="adminCatalogSearch" placeholder="ค้นหาชื่อ หมวด Alias..." value="${html(state.adminCatalogSearch)}"><div class="chip-row">${[['ALL','ทั้งหมด'],['SEAL','ซีล'],['ITEM','ไอเทม'],['SERVICE','บริการ']].map(([v,l])=>`<button class="filter-chip ${state.adminKindFilter===v?'active':''}" data-admin-kind="${v}">${l}</button>`).join('')}</div></div>
+    <div class="admin-catalog-tools"><input id="adminCatalogSearch" placeholder="ค้นหาชื่อ หมวด Alias..." value="${html(state.adminCatalogSearch)}"><div class="chip-row">${[['ALL','ทั้งหมด'],['SEAL','ซีล'],['ITEM','ไอเทม'],['SERVICE','บริการ'],['TMONEY','เงิน T']].map(([v,l])=>`<button class="filter-chip ${state.adminKindFilter===v?'active':''}" data-admin-kind="${v}">${l}</button>`).join('')}</div></div>
     <div class="bulk-bar"><label class="select-all"><input id="selectAllProducts" type="checkbox" ${all.length&&all.every((p)=>state.adminSelected.includes(`${p.kind}|${p.id}`))?'checked':''}> เลือกทั้งหมด</label><b>เลือก ${selectedCount} รายการ</b><select id="bulkField"><option value="status">สถานะ</option><option value="price">ราคา</option><option value="category">สายซีล</option><option value="section">ประเภทซีล</option><option value="unit">หน่วย</option><option value="lowStockAlert">จุดแจ้งเตือน</option></select><input id="bulkValue" placeholder="ค่าที่ต้องการ"><button class="btn success" id="bulkApplyBtn" ${selectedCount?'':'disabled'}>ใช้กับที่เลือก</button><button class="btn danger" id="bulkTrashBtn" ${selectedCount?'':'disabled'}>ย้ายลงถังขยะ</button></div>
     <div class="admin-list" id="adminList">${all.length ? all.map(adminProduct).join('') : '<div class="empty">ไม่พบสินค้า</div>'}</div>
   </section>`;
 }
 
 function adminProduct(product) {
-  const categoryLabel = product.kind === 'SEAL' ? `${product.category} • ${sectionLabel(product.section)}` : product.kind === 'SERVICE' ? product.serviceCategory : product.itemCategory;
-  const kindLabel = product.kind === 'SEAL' ? 'ซีล' : product.kind === 'SERVICE' ? 'บริการ' : 'ไอเทม';
+  const categoryLabel = product.kind === 'SEAL' ? `${product.category} • ${sectionLabel(product.section)}` : product.kind === 'SERVICE' ? product.serviceCategory : product.kind === 'TMONEY' ? 'Rate และ Stock' : product.itemCategory;
+  const kindLabel = product.kind === 'SEAL' ? 'ซีล' : product.kind === 'SERVICE' ? 'บริการ' : product.kind === 'TMONEY' ? 'เงิน T' : 'ไอเทม';
   const key = `${product.kind}|${product.id}`;
-  return `<div class="admin-card ${state.adminSelected.includes(key)?'selected':''}" data-admin-name="${html(norm(product.name))}"><label class="row-check"><input type="checkbox" data-select-product="${html(key)}" ${state.adminSelected.includes(key)?'checked':''}></label><div class="admin-thumb">${product.imageUrl ? `<img loading="lazy" decoding="async" src="${html(product.imageUrl)}" alt="">` : '<span>ไม่มีรูป</span>'}</div><div><b>${html(product.name)}</b><div class="product-meta"><span class="badge">${kindLabel}</span><span class="badge">${html(categoryLabel || '')}</span><span class="badge ${product.status === 'ACTIVE' ? 'green' : product.status === 'CHECK_STOCK' ? 'amber' : 'red'}">${html(product.status || 'ACTIVE')}</span> ${money(product.price)} บาท/${html(product.unit || '')}</div><div class="product-meta">${stockText(product)}</div></div><div><button class="btn small" data-edit="${html(product.kind)}|${html(product.id)}">แก้ไข</button> <button class="btn danger small" data-delete="${html(product.kind)}|${html(product.id)}">ถังขยะ</button></div></div>`;
+  return `<div class="admin-card ${state.adminSelected.includes(key)?'selected':''}" data-admin-name="${html(norm(product.name))}"><label class="row-check"><input type="checkbox" data-select-product="${html(key)}" ${state.adminSelected.includes(key)?'checked':''}></label><div class="admin-thumb"><span>${productFallbackIcon(product)}</span>${product.imageUrl ? `<img loading="lazy" decoding="async" fetchpriority="low" src="${html(product.imageUrl)}" alt="" onerror="this.hidden=true">` : ''}</div><div><b>${html(product.name)}</b><div class="product-meta"><span class="badge">${kindLabel}</span><span class="badge">${html(categoryLabel || '')}</span><span class="badge ${product.status === 'ACTIVE' ? 'green' : product.status === 'CHECK_STOCK' ? 'amber' : 'red'}">${html(product.status || 'ACTIVE')}</span> ${formatProductPrice(product)}</div><div class="product-meta">${stockText(product)}</div></div><div><button class="btn small" data-edit="${html(product.kind)}|${html(product.id)}">แก้ไข</button> <button class="btn danger small" data-delete="${html(product.kind)}|${html(product.id)}" ${product.kind==='TMONEY'?'disabled title="เงิน T เป็นสินค้าระบบหนึ่งรายการ"':''}>ถังขยะ</button></div></div>`;
+}
+
+function imageManagementPage(){
+  const manager=state.imageManager,preview=manager.preview,summary=preview&&preview.summary;
+  const matchRows=preview?(preview.matches||[]):[],conflictRows=preview?(preview.conflicts||[]):[],unmatched=preview?(preview.unmatched||[]):[];
+  return `<section class="panel image-manager">
+    <div class="admin-toolbar"><div><h2 class="panel-title">🖼️ Image Management</h2><p class="product-meta">นำเข้า ZIP รูป Seal / Item / Service โดยจับคู่ Product ID ก่อน แล้วจึงชื่อหรือ Alias</p></div><button class="btn" id="downloadMissingImagesBtn" ${preview&&preview.missingProducts&&preview.missingProducts.length?'':'disabled'}>📄 Missing Image Report</button></div>
+    ${manager.lastResult?`<div class="notice success"><b>Apply สำเร็จ ${manager.lastResult.applied} รายการ</b><span>Backup mapping: ${html(manager.lastResult.backupFileName||'-')} • ข้ามรูปเดิม ${manager.lastResult.skippedExisting||0}</span></div>`:''}
+    <div class="image-import-guide"><b>ตั้งชื่อไฟล์ที่แนะนำ</b><span><code>Product-ID.png</code> แม่นยำที่สุด หรือใช้ชื่อ/Alias ที่ตรงกันทุกตัว</span><small>รองรับ PNG, JPG, WEBP, GIF • ZIP ไม่เกิน 8 MB • รูปละไม่เกิน 2 MB • ไม่เก็บ binary ลง Google Sheet</small></div>
+    <div class="image-upload-row"><label class="file-drop">เลือก ZIP รูป<input id="imageZipInput" type="file" accept=".zip,application/zip" ${manager.applying?'disabled':''}></label><div><b>${html(manager.fileName||'ยังไม่ได้เลือกไฟล์')}</b><div class="product-meta">${manager.zipData?'พร้อมตรวจสอบการจับคู่':'ระบบจะ Preview mapping ก่อน Apply เสมอ'}</div></div><button class="btn primary" id="previewImageZipBtn" ${manager.zipData&&!manager.applying?'':'disabled'}>${manager.applying?'<span class="loading"></span> กำลังทำงาน...':'ตรวจสอบและ Preview'}</button></div>
+    ${summary?`<div class="image-summary"><div class="metric ready">Match<b>${summary.match}</b></div><div class="metric warning">ไฟล์ไม่ตรง<b>${summary.missingFile}</b></div><div class="metric danger">Conflict<b>${summary.conflict}</b></div><div class="metric">สินค้ายังไม่มีรูป<b>${summary.missingProductImage}</b></div><div class="metric warning">มีรูปเดิม<b>${summary.overwrite}</b></div></div>
+      ${conflictRows.length?`<div class="notice danger"><b>ยัง Apply ไม่ได้: พบ Conflict</b><span>แก้ชื่อไฟล์ให้เป็น Product ID ที่ไม่ซ้ำ แล้ว Preview ใหม่</span></div>`:''}
+      <div class="image-preview-grid"><div><h3>รายการจับคู่ (${matchRows.length})</h3><div class="image-map-list">${matchRows.length?matchRows.slice(0,250).map(item=>`<div class="image-map-row"><span class="badge green">MATCH</span><b>${html(item.fileName)}</b><span>→ ${html(item.kind)} / ${html(item.id)} / ${html(item.name)}</span><small>${item.matchBy==='PRODUCT_ID'?'Product ID':'ชื่อ/Alias'}${item.overwriteRequired?' • มีรูปเดิม':''}</small></div>`).join(''):'<div class="empty">ไม่มีไฟล์ที่จับคู่ได้</div>'}</div></div><div><h3>ต้องตรวจสอบ (${unmatched.length+conflictRows.length})</h3><div class="image-map-list">${unmatched.map(item=>`<div class="image-map-row"><span class="badge amber">MISSING</span><b>${html(item.fileName)}</b><span>ไม่พบ Product ID/ชื่อ/Alias ที่ตรงกัน</span></div>`).join('')}${conflictRows.map(item=>`<div class="image-map-row"><span class="badge red">CONFLICT</span><b>${html(item.fileName)}</b><span>${html(item.reason||'ตรงกับสินค้ามากกว่า 1 รายการ')}</span></div>`).join('')||'<div class="empty">ไม่พบปัญหา</div>'}</div></div></div>
+      <label class="overwrite-confirm"><input id="allowImageOverwrite" type="checkbox" ${manager.allowOverwrite?'checked':''}> อนุญาตเขียนทับรูปเดิม (${summary.overwrite} รายการ) — ระบบจะถามยืนยันอีกครั้ง</label>
+      <button class="btn success image-apply" id="applyImageZipBtn" ${matchRows.length&&!conflictRows.length&&!manager.applying?'':'disabled'}>${manager.applying?'<span class="loading"></span> กำลัง Backup และ Apply...':'Backup mapping แล้ว Apply รูปที่ Match'}</button>`:''}
+  </section>`;
 }
 
 function parseDateValue(value) {
@@ -665,7 +728,7 @@ function orderItems(order) {
 }
 function reportProductMap() {
   const map = new Map();
-  [...(state.adminData?.seals || []), ...(state.adminData?.gameItems || []), ...(state.adminData?.services || [])]
+  [...(state.adminData?.seals || []), ...(state.adminData?.gameItems || []), ...(state.adminData?.services || []), ...(state.adminData?.moneyT ? [state.adminData.moneyT] : [])]
     .forEach((product) => map.set(`${product.kind}|${product.id}`, product));
   return map;
 }
@@ -673,7 +736,7 @@ function analyticsDataset() {
   const orders = reportOrders();
   const valid = orders.filter((o) => !['CANCELLED'].includes(String(o.status || '')));
   const paid = valid.filter((o) => String(o.status || '') === 'COMPLETED');
-  const products = [...(state.adminData?.seals || []), ...(state.adminData?.gameItems || []), ...(state.adminData?.services || [])];
+  const products = [...(state.adminData?.seals || []), ...(state.adminData?.gameItems || []), ...(state.adminData?.services || []), ...(state.adminData?.moneyT ? [state.adminData.moneyT] : [])];
   const productMap = reportProductMap();
   const daily = {};
   const top = {};
@@ -737,7 +800,7 @@ function exportOrdersCsv() {
   toast('ส่งออกออเดอร์สำหรับ Excel แล้ว');
 }
 function exportProductsCsv() {
-  const products = [...(state.adminData?.seals || []), ...(state.adminData?.gameItems || []), ...(state.adminData?.services || [])];
+  const products = [...(state.adminData?.seals || []), ...(state.adminData?.gameItems || []), ...(state.adminData?.services || []), ...(state.adminData?.moneyT ? [state.adminData.moneyT] : [])];
   const rows = products.map((p) => [p.kind,p.id,p.name,(p.aliases||[]).join('|'),p.category||p.itemCategory||p.serviceCategory||'',p.section||'',p.price,p.unit,p.status,p.stock,p.reservedStock,p.lowStockAlert,p.costPrice,p.badge,p.imageUrl]);
   csvDownload(`DMO-products-${new Date().toISOString().slice(0,10)}.csv`, ['kind','id','name','aliases','category','section','price','unit','status','stock','reservedStock','lowStockAlert','costPrice','badge','imageUrl'], rows);
   toast('ส่งออกสินค้าแล้ว');
@@ -829,6 +892,73 @@ function allowedOrderStatuses(current) {
   return transitions[String(current || 'NEW')] || ['NEW'];
 }
 
+function adminCatalogProducts() {
+  return [
+    ...(state.adminData?.seals || []).map((x) => ({ ...x, kind: 'SEAL' })),
+    ...(state.adminData?.gameItems || []).map((x) => ({ ...x, kind: x.kind || 'ITEM' })),
+    ...(state.adminData?.services || []).map((x) => ({ ...x, kind: 'SERVICE' })),
+    ...(state.adminData?.moneyT ? [{ ...state.adminData.moneyT, kind: 'TMONEY' }] : []),
+  ];
+}
+
+function pickingProduct(item) {
+  return adminCatalogProducts().find((product) => String(product.id) === String(item.productId || item.id) && String(product.kind) === String(item.kind)) || null;
+}
+
+function pickingCategory(item, product) {
+  if (String(item.kind) === 'SEAL') return `ซีล • ${product?.category || '-'} • ${sectionLabel(product?.section || '')}`;
+  if (String(item.kind) === 'SERVICE') return `บริการ • ${product?.serviceCategory || '-'}`;
+  if (String(item.kind) === 'TMONEY') return 'เงิน T';
+  return `ไอเทม • ${product?.itemCategory || '-'}`;
+}
+
+function pickingStockText(item, product) {
+  if (String(item.kind) === 'SERVICE') return 'บริการ • ไม่ตัดสต๊อก';
+  if (!product || product.stock === '' || product.stock === null || product.stock === undefined) return 'ต้องตรวจสต๊อก';
+  return `Stock ${money(product.stock)} • พร้อมขาย ${money(availableStock(product))} ${saleUnit(product)}`;
+}
+
+function facebookPostText() {
+  const data = state.adminData || {};
+  const active = (list) => (list || []).filter((x) => String(x.status || 'ACTIVE') === 'ACTIVE');
+  const order = ['AT', 'HT', 'CT', 'HP', 'DS', 'DE', 'EV', 'BL'];
+  const lines = ['🛒 สินค้าและบริการ GUN SHOP DMO', ''];
+  const seals = active(data.seals).slice().sort((a, b) => order.indexOf(a.category) - order.indexOf(b.category) || String(a.name).localeCompare(String(b.name), 'th'));
+  if (seals.length) {
+    lines.push('🦖 ซีล');
+    order.forEach((category) => {
+      const rows = seals.filter((x) => x.category === category);
+      if (rows.length) lines.push('', category, ...rows.map((x) => `• ${x.name} — ${formatProductPrice(x)}`));
+    });
+    lines.push('');
+  }
+  const items = active(data.gameItems).filter((x) => String(x.kind || 'ITEM') !== 'TMONEY');
+  if (items.length) lines.push('🎒 ไอเทม', ...items.map((x) => `• ${x.name} — ${formatProductPrice(x)}`), '');
+  const services = active(data.services);
+  if (services.length) lines.push('⚔️ บริการ', ...services.map((x) => `• ${x.name} — ${formatProductPrice(x)}`), '');
+  const moneyT = data.moneyT;
+  if (moneyT && String(moneyT.status) === 'ACTIVE' && Number(moneyT.price) > 0 && Number(availableStock(moneyT)) > 0) lines.push('💰 เงิน T', `• ${moneyT.name || 'เงิน T'} — ${formatProductPrice(moneyT)}`, '');
+  const promos = active(data.promotions);
+  const threshold = Number(data.settings?.promoThreshold || state.settings?.promoThreshold || 0);
+  const reward = Number(data.settings?.promoReward || state.settings?.promoReward || 0);
+  if (threshold > 0 && reward > 0) lines.push('🎁 โปรโมชั่น D2', `ซื้อซีลครบทุก ${money(threshold)} บาท รับ D2 ${money(reward)} อัน (คิดเฉพาะซีล)`, '');
+  promos.filter((x) => String(x.type) !== 'REWARD_PER_SPEND').forEach((x) => lines.push(`🎁 ${x.name}${x.rewardText ? ` — ${x.rewardText}` : ''}`));
+  lines.push('', 'สนใจสินค้า คัดลอกรายการจากหน้าร้านแล้วส่งมาให้ร้านตรวจสต๊อกได้เลย');
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function facebookPostGenerator() {
+  const text = facebookPostText();
+  return `<section class="panel marketing-generator"><div class="admin-toolbar"><div><h2 class="panel-title">📣 สร้างโพสต์ Facebook</h2><p class="product-meta">สร้างข้อความจากสินค้าและโปรโมชั่นที่เปิดใช้งานอยู่ ไม่มีการโพสต์อัตโนมัติ</p></div></div><div class="security-note">ข้อมูลมาจากแคตตาล็อกปัจจุบัน • ซีลเรียง AT → HT → CT → HP → DS → DE → EV → BL • ราคาใช้หน่วยจริง</div><label class="full"><b>ตัวอย่างโพสต์</b><textarea id="facebookPostPreview" class="marketing-preview" readonly>${html(text)}</textarea></label><div class="chip-row"><button class="btn primary" id="copyFacebookPostBtn">📋 คัดลอกโพสต์</button>${state.adminData?.settings?.facebookUrl ? `<a class="btn" href="${html(state.adminData.settings.facebookUrl)}" target="_blank" rel="noopener">เปิด Facebook ร้าน</a>` : ''}</div></section>`;
+}
+
+function pickingRowHtml(item, order, archived, busy) {
+  const product = pickingProduct(item);
+  const picked = String(item.pickStatus) === 'PICKED';
+  const disabled = busy || String(item.orderItemId || '').startsWith('legacy-') || ['COMPLETED', 'CANCELLED'].includes(order.status);
+  return `<div class="pick-row ${picked ? 'picked' : ''}"><div class="pick-check">${picked ? '✅' : '⬜'}</div><div class="pick-category">${html(pickingCategory(item, product))}</div><div class="pick-name"><b>${html(item.productName || item.name || '-')}</b><small>${formatProductPrice({ price:item.unitPrice ?? item.price, unit:item.unit, packSize:item.packSize, kind:item.kind })}</small></div><div class="pick-quantity"><b>${money(item.quantity)} ${html(item.unit || '')}</b><small>จำนวนที่ต้องจัด</small></div><div class="pick-stock ${String(item.stockCheck) === 'OK' ? 'stock-ok' : 'stock-warn'}">${html(pickingStockText(item, product))}<small>${html(item.stockCheck || 'รอตรวจ')}</small></div>${archived ? '' : `<button class="btn small ${picked ? 'success' : ''}" data-pick-item="${html(item.orderItemId || '')}|${picked ? 'UNCHECKED' : 'PICKED'}" data-order-id="${html(order.orderId)}" ${disabled ? 'disabled' : ''}>${picked ? 'ยกเลิกติ๊ก' : '✓ จัดแล้ว'}</button>`}</div>`;
+}
+
 function adminOrders() {
   const actor=state.adminData?.security?.actor||state.adminUser||{},canManage=['OWNER','ADMIN'].includes(String(actor.role||''));
   const archived=state.adminOrderMode==='ARCHIVED';
@@ -836,22 +966,23 @@ function adminOrders() {
   const itemRows = state.adminData.orderItems || [];
   const filter=state.adminOrderFilter||'ALL';
   const query=String(state.adminOrderSearch||'').trim().toLowerCase();
-  const orders=allOrders.filter(o=>(filter==='ALL'||String(o.status||'NEW')===filter)&&(!query||[o.orderId,o.tamer,o.contact,o.server,o.status,orderStatusThai(o.status)].some(x=>String(x||'').toLowerCase().includes(query))));
+  const orders=allOrders.filter(o=>(filter==='ALL'||(filter==='SPAM'?String(o.spamStatus)==='SPAM':String(o.status||'NEW')===filter))&&(!query||[o.orderId,o.tamer,o.contact,o.server,o.status,o.spamStatus,orderStatusThai(o.status)].some(x=>String(x||'').toLowerCase().includes(query))));
   const statuses=['NEW','CHECKING','PREPARING','READY','COMPLETED','CANCELLED'];
-  const count=(s)=>allOrders.filter(o=>String(o.status||'NEW')===s).length;
+  const count=(s)=>allOrders.filter(o=>s==='SPAM'?String(o.spamStatus)==='SPAM':String(o.status||'NEW')===s).length;
   let cards=orders.map((order)=>{
     let items=itemRows.filter(x=>String(x.orderId)===String(order.orderId));
-    if(!items.length){try{items=JSON.parse(order.itemsJson||'[]').map((x,i)=>({orderItemId:`legacy-${i}`,orderId:order.orderId,productId:x.productId||x.id,productName:x.productName||x.name,kind:x.kind,quantity:x.quantity,unit:x.unit,unitPrice:x.unitPrice??x.price,lineTotal:x.lineTotal??Number(x.price||0)*Number(x.quantity||0),pickStatus:x.pickStatus||'UNCHECKED',stockCheck:x.stockCheck||'LEGACY'}));}catch(e){items=[];}}
+    if(!items.length){try{items=JSON.parse(order.itemsJson||'[]').map((x,i)=>({orderItemId:`legacy-${i}`,orderId:order.orderId,productId:x.productId||x.id,productName:x.productName||x.name,kind:x.kind,quantity:x.quantity,unit:x.unit,unitPrice:x.unitPrice??x.price,lineTotal:x.lineTotal??Number(x.price||0)*Number(x.quantity||0),packSize:x.packSize||'',pickStatus:x.pickStatus||'UNCHECKED',stockCheck:x.stockCheck||'LEGACY'}));}catch(e){items=[];}}
     const picked=items.filter(x=>String(x.pickStatus)==='PICKED').length;
     const cls=String(order.status||'NEW').toLowerCase();
     const legacy=String(order.legacyOrder||'').toUpperCase()==='TRUE'||order.legacyOrder===true;
     const allowed = legacy?[String(order.status||'NEW')]:allowedOrderStatuses(order.status);
     const nextStatus = allowed.find((status) => status !== order.status && status !== 'CANCELLED');
     const busy=state.adminActionPending===String(order.orderId);
-    return `<article class="order-card-v20 ${cls} ${archived?'archived':''}"><div class="order-card-head"><div><div class="order-id-big">${html(order.orderId)}</div><div class="product-meta">สร้างเมื่อ ${html(order.createdAt||'-')}</div></div><div><div class="order-total">${money(order.total)} บาท</div><span class="badge ${order.status==='COMPLETED'?'green':order.status==='CANCELLED'?'red':'amber'}">${html(orderStatusThai(order.status||'NEW'))}</span></div></div><div class="order-summary-grid"><div><span>ลูกค้า/เทมเมอร์</span><b>${html(order.tamer||'-')}</b></div><div><span>เซิร์ฟเวอร์</span><b>${html(order.server||'-')}</b></div><div><span>ชื่อ Facebook</span><b>${html(order.contact||'-')}</b></div><div><span>จัดสินค้า</span><b>${items.length&&picked===items.length?'จัดครบแล้ว':`${picked}/${items.length} รายการ`}</b></div></div>${archived?`<div class="archive-note"><b>เก็บเมื่อ:</b> ${html(order.deletedAt||'-')} • <b>โดย:</b> ${html(order.deletedBy||'-')}<br><b>เหตุผล:</b> ${html(order.deleteReason||'-')}</div>`:`<div class="order-progress"><span class="active">รับออเดอร์</span><span class="${['CHECKING','PREPARING','READY','COMPLETED'].includes(order.status)?'active':''}">ตรวจ</span><span class="${['PREPARING','READY','COMPLETED'].includes(order.status)?'active':''}">จัดของ</span><span class="${['READY','COMPLETED'].includes(order.status)?'active':''}">พร้อมส่ง</span><span class="${order.status==='COMPLETED'?'active':''}">เสร็จสิ้น</span></div>`}<div class="order-items-v20">${items.map(it=>`<div class="pick-row ${String(it.pickStatus)==='PICKED'?'picked':''}"><div>${String(it.pickStatus)==='PICKED'?'✅':'⬜'}</div><div class="pick-name">${html(it.productName||it.name||'-')}<small>${money(it.quantity)} ${html(it.unit||'')} × ${money(it.unitPrice||it.price||0)} บาท • ${html(it.kind||'')}</small></div><div class="${String(it.stockCheck)==='OK'?'stock-ok':'stock-warn'}">${html(it.stockCheck||'รอตรวจ')}</div>${archived?'':`<button class="btn small ${String(it.pickStatus)==='PICKED'?'success':''}" data-pick-item="${html(it.orderItemId||'')}|${String(it.pickStatus)==='PICKED'?'UNCHECKED':'PICKED'}" data-order-id="${html(order.orderId)}" ${busy||String(it.orderItemId||'').startsWith('legacy-')||['COMPLETED','CANCELLED'].includes(order.status)?'disabled':''}>${String(it.pickStatus)==='PICKED'?'ยกเลิกติ๊ก':'✓ จัดแล้ว'}</button>`}</div>`).join('')||'<div class="empty">ไม่พบรายการสินค้า</div>'}</div>${archived?`<div class="order-archive-actions"><div class="security-note">กู้คืนแล้วจะคงสถานะและสต๊อกเดิม ระบบจะไม่จองหรือตัดสต๊อกให้อัตโนมัติ</div><button class="btn success" data-restore-order="${html(order.orderId)}" ${busy?'disabled':''}>${busy?'กำลังดำเนินการ...':'↩ กู้คืนออเดอร์'}</button></div>`:`${nextStatus?`<div class="next-step-hint">ขั้นตอนถัดไป: <b>${orderStatusThai(nextStatus)}</b></div>`:''}<div class="order-actions-v20"><select data-order-status="${html(order.orderId)}" ${busy||allowed.length===1?'disabled':''}>${allowed.map(status=>`<option value="${status}" ${order.status===status?'selected':''}>${orderStatusThai(status)}</option>`).join('')}</select><input data-order-note="${html(order.orderId)}" value="${html(order.adminNote||'')}" placeholder="หมายเหตุร้าน" ${busy?'disabled':''}><button class="btn success" data-save-order="${html(order.orderId)}" ${busy||allowed.length===1?'disabled':''}>${busy?'กำลังบันทึก...':'บันทึกสถานะ'}</button>${canManage?`<button class="btn danger subtle" data-archive-order="${html(order.orderId)}" ${busy?'disabled':''}>เก็บเข้าถัง</button>`:''}</div>`}</article>`;
+    const isSpam=String(order.spamStatus||'')==='SPAM';
+    return `<article class="order-card-v20 ${cls} ${archived?'archived':''} ${isSpam?'spam-order':''}"><div class="order-card-head"><div><div class="order-id-big">${html(order.orderId)}</div><div class="product-meta">สร้างเมื่อ ${html(order.createdAt||'-')}</div></div><div><div class="order-total">${money(order.total)} บาท</div><span class="badge ${order.status==='COMPLETED'?'green':order.status==='CANCELLED'?'red':'amber'}">${html(orderStatusThai(order.status||'NEW'))}</span>${isSpam?'<span class="badge red">SPAM</span>':''}</div></div><div class="order-summary-grid"><div><span>ลูกค้า/เทมเมอร์</span><b>${html(order.tamer||'-')}</b></div><div><span>เซิร์ฟเวอร์</span><b>${html(order.server||'-')}</b></div><div><span>ชื่อ Facebook</span><b>${html(order.contact||'-')}</b></div><div><span>จัดสินค้า</span><b>${items.length&&picked===items.length?'จัดครบแล้ว':`${picked}/${items.length} รายการ`}</b></div></div>${isSpam?`<div class="spam-note"><b>ทำเครื่องหมาย Spam:</b> ${html(order.spamNote||'-')} • ${html(order.spamUpdatedAt||'')}</div>`:''}${archived?`<div class="archive-note"><b>เก็บเมื่อ:</b> ${html(order.deletedAt||'-')} • <b>โดย:</b> ${html(order.deletedBy||'-')}<br><b>เหตุผล:</b> ${html(order.deleteReason||'-')}</div>`:`<div class="order-progress"><span class="active">รับออเดอร์</span><span class="${['CHECKING','PREPARING','READY','COMPLETED'].includes(order.status)?'active':''}">ตรวจ</span><span class="${['PREPARING','READY','COMPLETED'].includes(order.status)?'active':''}">จัดของ</span><span class="${['READY','COMPLETED'].includes(order.status)?'active':''}">พร้อมส่ง</span><span class="${order.status==='COMPLETED'?'active':''}">เสร็จสิ้น</span></div>`}<div class="order-items-v20">${items.map((item)=>pickingRowHtml(item,order,archived,busy)).join('')||'<div class="empty">ไม่พบรายการสินค้า</div>'}</div>${archived?`<div class="order-archive-actions"><div class="security-note">กู้คืนแล้วจะคงสถานะและสต๊อกเดิม ระบบจะไม่จองหรือตัดสต๊อกให้อัตโนมัติ</div><button class="btn success" data-restore-order="${html(order.orderId)}" ${busy?'disabled':''}>${busy?'กำลังดำเนินการ...':'↩ กู้คืนออเดอร์'}</button></div>`:`${nextStatus?`<div class="next-step-hint">ขั้นตอนถัดไป: <b>${orderStatusThai(nextStatus)}</b></div>`:''}<div class="order-actions-v20"><select data-order-status="${html(order.orderId)}" ${busy||allowed.length===1?'disabled':''}>${allowed.map(status=>`<option value="${status}" ${order.status===status?'selected':''}>${orderStatusThai(status)}</option>`).join('')}</select><input data-order-note="${html(order.orderId)}" value="${html(order.adminNote||'')}" placeholder="หมายเหตุร้าน" ${busy?'disabled':''}><button class="btn success" data-save-order="${html(order.orderId)}" ${busy||allowed.length===1?'disabled':''}>${busy?'กำลังบันทึก...':'บันทึกสถานะ'}</button>${canManage?`<button class="btn ${isSpam?'warning':'danger'} subtle" data-spam-order="${html(order.orderId)}|${isSpam?'CLEARED':'SPAM'}" ${busy?'disabled':''}>${isSpam?'ยกเลิก Spam':'ทำเครื่องหมาย Spam'}</button><button class="btn danger subtle" data-archive-order="${html(order.orderId)}" ${busy?'disabled':''}>เก็บเข้าถัง</button>`:''}</div>`}</article>`;
   }).join('');
   if(orders.some(order=>String(order.legacyOrder||'').toUpperCase()==='TRUE'||order.legacyOrder===true))cards='<div class="security-note">📦 ออเดอร์ที่มีป้าย Legacy เป็นออเดอร์เก่า — ไม่ได้อยู่ในระบบจองสต๊อก V20.1 ปุ่มเปลี่ยนสถานะจึงถูกปิด และการเก็บเข้าถังจะไม่เปลี่ยน Stock/Reserved Stock</div>'+cards;
-  return `<section class="panel"><div class="admin-toolbar"><div><h2 class="panel-title">🧾 ศูนย์ออเดอร์และจัดของ</h2><p class="product-meta">ค้นหา ตรวจสต๊อก ติ๊กจัดของ และปิดงานจากหน้าเดียว</p></div><button class="btn" id="reloadOrdersBtn">🔄 โหลดใหม่</button></div><div class="order-mode-tabs"><button class="filter-chip ${!archived?'active':''}" data-order-mode="ACTIVE">ออเดอร์ใช้งาน (${(state.adminData.orders||[]).length})</button>${canManage?`<button class="filter-chip ${archived?'active':''}" data-order-mode="ARCHIVED">ถังออเดอร์ (${(state.adminData.deletedOrders||[]).length})</button>`:''}</div><input id="adminOrderSearch" class="order-search" value="${html(state.adminOrderSearch)}" placeholder="ค้นหาเลขออเดอร์ ชื่อลูกค้า Facebook หรือสถานะ"><div class="order-kpis"><div class="order-kpi"><span>ออเดอร์ใหม่</span><b>${count('NEW')}</b></div><div class="order-kpi"><span>กำลังตรวจ</span><b>${count('CHECKING')}</b></div><div class="order-kpi"><span>กำลังจัด</span><b>${count('PREPARING')}</b></div><div class="order-kpi"><span>พร้อมส่ง</span><b>${count('READY')}</b></div><div class="order-kpi"><span>เสร็จแล้ว</span><b>${count('COMPLETED')}</b></div><div class="order-kpi"><span>ยกเลิก</span><b>${count('CANCELLED')}</b></div></div><div class="admin-order-filter">${['ALL',...statuses].map(s=>`<button class="filter-chip ${filter===s?'active':''}" data-order-filter="${s}">${s==='ALL'?'ทั้งหมด':orderStatusThai(s)}</button>`).join('')}</div><div class="security-note">🔐 ระบบตรวจราคาและสต๊อกที่ Server • เสร็จสิ้นจะตัดสต๊อก • ยกเลิกหรือเก็บออเดอร์ที่ยังจองอยู่จะคืน Reserved Stock เพียงครั้งเดียว</div><div class="order-admin-grid">${cards||'<div class="empty">ไม่พบออเดอร์</div>'}</div></section>`;
+  return `<section class="panel"><div class="admin-toolbar"><div><h2 class="panel-title">🧾 ศูนย์ออเดอร์และจัดของ</h2><p class="product-meta">ค้นหา ตรวจสต๊อก ติ๊กจัดของ และปิดงานจากหน้าเดียว</p></div><button class="btn" id="reloadOrdersBtn">🔄 โหลดใหม่</button></div><div class="order-mode-tabs"><button class="filter-chip ${!archived?'active':''}" data-order-mode="ACTIVE">ออเดอร์ใช้งาน (${(state.adminData.orders||[]).length})</button>${canManage?`<button class="filter-chip ${archived?'active':''}" data-order-mode="ARCHIVED">ถังออเดอร์ (${(state.adminData.deletedOrders||[]).length})</button>`:''}</div><input id="adminOrderSearch" class="order-search" value="${html(state.adminOrderSearch)}" placeholder="ค้นหาเลขออเดอร์ ชื่อลูกค้า Facebook หรือสถานะ"><div class="order-kpis"><div class="order-kpi"><span>ออเดอร์ใหม่</span><b>${count('NEW')}</b></div><div class="order-kpi"><span>กำลังตรวจ</span><b>${count('CHECKING')}</b></div><div class="order-kpi"><span>กำลังจัด</span><b>${count('PREPARING')}</b></div><div class="order-kpi"><span>พร้อมส่ง</span><b>${count('READY')}</b></div><div class="order-kpi"><span>เสร็จแล้ว</span><b>${count('COMPLETED')}</b></div><div class="order-kpi"><span>ยกเลิก</span><b>${count('CANCELLED')}</b></div><div class="order-kpi spam"><span>Spam</span><b>${count('SPAM')}</b></div></div><div class="admin-order-filter">${['ALL',...statuses,'SPAM'].map(s=>`<button class="filter-chip ${filter===s?'active':''}" data-order-filter="${s}">${s==='ALL'?'ทั้งหมด':s==='SPAM'?'Spam':orderStatusThai(s)}</button>`).join('')}</div><div class="security-note">🔐 ระบบตรวจราคาและสต๊อกที่ Server • เสร็จสิ้นจะตัดสต๊อก • ยกเลิกหรือเก็บออเดอร์ที่ยังจองอยู่จะคืน Reserved Stock เพียงครั้งเดียว • ป้าย Spam ไม่เปลี่ยน Stock หรือ Reserved</div><div class="order-admin-grid">${cards||'<div class="empty">ไม่พบออเดอร์</div>'}</div></section>`;
 }
 
 function integrityPage(){
@@ -949,7 +1080,7 @@ function adminSecurity() {
 function adminSettings() {
   const settings = state.adminData.settings || {};
   const security=state.adminData.security||{},account=security.account||security.actor||{},owner=String(account.role||'')==='OWNER',environment=security.environment||'ไม่ทราบ';
-  return `<section class="panel"><h2 class="panel-title">ตั้งค่าร้าน</h2><div class="form-grid"><label>ชื่อร้าน<input id="setShopName" value="${html(settings.shopName || 'GUN SHOP DMO')}"></label><label>ชื่อเจ้าของร้าน<input id="setOwnerName" value="${html(settings.ownerName || 'Natthananat Kawinwatthanakorn')}"></label><label>ยอดครบโปร D2<input id="setThreshold" type="number" value="${html(settings.promoThreshold || 100)}"></label><label>จำนวน D2 ต่อชุด<input id="setReward" type="number" value="${html(settings.promoReward || 150)}"></label><label>รีเฟรชทุกกี่วินาที<input id="setRefresh" type="number" value="${html(settings.autoRefreshSeconds || 60)}"></label><label>Session (วัน)<input id="setSessionDays" type="number" min="1" max="30" value="${html(settings.sessionDays || 7)}"></label><label>Auto Lock (นาที)<input id="setAutoLock" type="number" min="5" value="${html(settings.autoLockMinutes || 30)}"></label><label>API Key<input id="setApiKey" type="password" value="${html(settings.apiKey || '')}" placeholder="ตั้งได้ตามต้องการ"></label><label>Facebook URL<input id="setFacebook" value="${html(settings.facebookUrl || '')}"></label><label>LINE URL<input id="setLine" value="${html(settings.lineUrl || '')}"></label><label class="full">ข้อความท้ายออเดอร์<textarea id="setNotice">${html(settings.orderNotice || '')}</textarea></label><label><input id="setAllowOrder" type="checkbox" ${settings.allowOrderSave !== false ? 'checked' : ''}> บันทึกออเดอร์ลงชีต</label><label><input id="setShowStock" type="checkbox" ${settings.showStock !== false ? 'checked' : ''}> แสดงสต๊อกแก่ลูกค้า</label><button class="btn success full" id="saveSettingsBtn">บันทึกการตั้งค่า</button></div></section>
+  return `<section class="panel"><h2 class="panel-title">ตั้งค่าร้าน</h2><div class="form-grid"><label>ชื่อร้าน<input id="setShopName" value="${html(settings.shopName || 'GUN SHOP DMO')}"></label><label>ชื่อเจ้าของร้าน<input id="setOwnerName" value="${html(settings.ownerName || 'Natthananat Kawinwatthanakorn')}"></label><label>ยอดครบโปร D2<input id="setThreshold" type="number" value="${html(settings.promoThreshold || 100)}"></label><label>จำนวน D2 ต่อชุด<input id="setReward" type="number" value="${html(settings.promoReward || 150)}"></label><label>รีเฟรชทุกกี่วินาที<input id="setRefresh" type="number" value="${html(settings.autoRefreshSeconds || 60)}"></label><label>พักหลังส่งออเดอร์ (วินาที)<input id="setOrderCooldown" type="number" min="5" max="120" value="${html(settings.orderSubmitCooldownSeconds || 30)}"></label><label>ช่วงตรวจ Rate limit (วินาที)<input id="setOrderRateWindow" type="number" min="60" max="3600" value="${html(settings.orderRateWindowSeconds || 300)}"></label><label>ออเดอร์สูงสุดต่อช่วง<input id="setOrderRateMax" type="number" min="1" max="10" value="${html(settings.orderRateMax || 3)}"></label><label>Session (วัน)<input id="setSessionDays" type="number" min="1" max="30" value="${html(settings.sessionDays || 7)}"></label><label>Auto Lock (นาที)<input id="setAutoLock" type="number" min="5" value="${html(settings.autoLockMinutes || 30)}"></label><label>API Key<input id="setApiKey" type="password" value="${html(settings.apiKey || '')}" placeholder="ตั้งได้ตามต้องการ"></label><label>Facebook URL<input id="setFacebook" value="${html(settings.facebookUrl || '')}"></label><label>LINE URL<input id="setLine" value="${html(settings.lineUrl || '')}"></label><label class="full">โปสเตอร์หน้าบริการ (URL รูปจริง)<input id="setServicePoster" value="${html(settings.servicePosterUrl || '')}" placeholder="เว้นว่างเพื่อซ่อนโปสเตอร์อย่างสะอาด"><small class="product-meta">ใช้รูปโปสเตอร์จริงเท่านั้น หากไม่มีให้เว้นว่าง</small></label><label class="full">ข้อความท้ายออเดอร์<textarea id="setNotice">${html(settings.orderNotice || '')}</textarea></label><label><input id="setAllowOrder" type="checkbox" ${settings.allowOrderSave !== false ? 'checked' : ''}> บันทึกออเดอร์ลงชีต</label><label><input id="setShowStock" type="checkbox" ${settings.showStock !== false ? 'checked' : ''}> แสดงสต๊อกแก่ลูกค้า</label><button class="btn success full" id="saveSettingsBtn">บันทึกการตั้งค่า</button></div></section>
   <section class="panel"><div class="admin-toolbar"><div><h2 class="panel-title">🔐 บัญชีและความปลอดภัย</h2><p class="product-meta">เปลี่ยนรหัสผ่านจากหน้านี้เป็นวิธีหลักสำหรับการใช้งานประจำ</p></div><span class="badge ${environment==='PRODUCTION'?'red':environment==='TEST'?'amber':''}">${html(environment)}</span></div><div class="stat-grid"><div class="stat-card"><span>User ID</span><strong>${html(account.userId||'-')}</strong></div><div class="stat-card"><span>Role</span><strong>${html(account.role||'-')}</strong></div><div class="stat-card"><span>สถานะบัญชี</span><strong>${html(account.status||'ACTIVE')}</strong></div></div>${owner?`<div class="form-grid owner-password-form"><label>รหัสผ่านปัจจุบัน<div class="password-field"><input id="ownerCurrentPassword" type="password" autocomplete="current-password"><button type="button" class="btn small" data-toggle-password="ownerCurrentPassword">แสดง</button></div></label><label>รหัสผ่านใหม่<div class="password-field"><input id="ownerNewPassword" type="password" minlength="10" autocomplete="new-password"><button type="button" class="btn small" data-toggle-password="ownerNewPassword">แสดง</button></div></label><label>ยืนยันรหัสผ่านใหม่<div class="password-field"><input id="ownerConfirmPassword" type="password" minlength="10" autocomplete="new-password"><button type="button" class="btn small" data-toggle-password="ownerConfirmPassword">แสดง</button></div></label><button class="btn success" id="changeOwnerPasswordBtn">เปลี่ยนรหัสผ่าน</button></div><div class="security-note">รหัสผ่านใหม่ต้องมีอย่างน้อย 10 ตัวอักษร เมื่อเปลี่ยนสำเร็จ ระบบจะออกจากทุก Session และให้เข้าสู่ระบบใหม่</div>`:`<div class="warning-box"><strong>เฉพาะ OWNER เท่านั้นที่เปลี่ยนรหัสผ่าน OWNER ได้</strong></div>`}</section>`;
 }
 
@@ -962,7 +1093,8 @@ function editModal() {
   const record = state.editRecord || { kind: 'SEAL', status: 'ACTIVE', category: 'AT', section: 'NORMAL', unit: 'ชุด', packSize: 1000, sortOrder: 10 };
   const seal = record.kind === 'SEAL';
   const service = record.kind === 'SERVICE';
-  return `<div class="modal-backdrop" id="modalBackdrop"><div class="modal"><h2>${record.id ? 'แก้ไข' : 'เพิ่ม'}${seal ? 'ซีล' : service ? 'บริการ' : 'ไอเทม'}</h2><div class="form-grid"><label>ชื่อ<input id="fName" value="${html(record.name || '')}"></label><label>ชื่อค้นหาเพิ่มเติม<input id="fAliases" value="${html(Array.isArray(record.aliases) ? record.aliases.join('|') : record.aliases || '')}" placeholder="คั่นด้วย |"></label>${seal ? `<label>สาย<select id="fCategory">${['AT', 'HT', 'CT', 'HP', 'DS', 'DE', 'EV', 'BL'].map((category) => `<option ${record.category === category ? 'selected' : ''}>${category}</option>`).join('')}</select></label><label>ประเภท<select id="fSection">${['NORMAL', 'BASE_HARD', 'SUSA'].map((section) => `<option value="${section}" ${record.section === section ? 'selected' : ''}>${sectionLabel(section)}</option>`).join('')}</select></label><label>ชื่ออังกฤษ/คำค้น DMO Wiki<input id="fWikiName" value="${html(record.wikiName || '')}" placeholder="เช่น Agumon"></label><label>ชื่อหน้าที่เชื่อม<input id="fWikiTitle" value="${html(record.wikiTitle || '')}" placeholder="เชื่อมผ่าน DMO Wiki Center"></label><label class="full">URL DMO Wiki<input id="fWikiUrl" value="${html(record.wikiUrl || '')}"></label>` : service ? `<label>หมวดบริการ<input id="fServiceCategory" value="${html(record.serviceCategory || '')}" placeholder="เช่น ดันเจียน / เควสต์"></label>` : `<label>หมวดไอเทม<input id="fItemCategory" value="${html(record.itemCategory || '')}"></label>`}<label>ราคา<input id="fPrice" type="number" step="0.01" value="${html(record.price || 0)}"></label><label>หน่วย<input id="fUnit" value="${html(record.unit || (service ? 'ครั้ง' : 'ชิ้น'))}"></label>${seal ? `<label>จำนวนต่อชุด<input id="fPackSize" type="number" value="${html(record.packSize || 1000)}"></label>` : ''}<label>สถานะ<select id="fStatus">${['ACTIVE', 'CHECK_STOCK', 'OUT_OF_STOCK', 'INACTIVE', 'HIDDEN'].map((status) => `<option ${record.status === status ? 'selected' : ''}>${status}</option>`).join('')}</select></label><label>สต๊อกทั้งหมด (เว้นว่าง = ตรวจสอบ)<input id="fStock" type="number" value="${record.stock === '' ? '' : html(record.stock)}"></label><label>จำนวนที่กันไว้<input id="fReservedStock" type="number" min="0" value="${html(record.reservedStock || 0)}"></label><label>แจ้งเตือนใกล้หมด<input id="fLowStockAlert" type="number" min="0" value="${html(record.lowStockAlert || 0)}"></label><label>ต้นทุนต่อหน่วย<input id="fCostPrice" type="number" step="0.01" min="0" value="${html(record.costPrice || '')}"></label><label>ลำดับแสดง<input id="fSort" type="number" value="${html(record.sortOrder || 10)}"></label><label>ป้ายสินค้า<input id="fBadge" value="${html(record.badge || '')}" placeholder="HOT / NEW / SALE"></label><label>แท็กค้นหา<input id="fTags" value="${html(record.tags || '')}" placeholder="PVP|ขายดี|ดิจิมอน X"></label><label class="full">คำค้นเพิ่มเติม<input id="fSearchKeywords" value="${html(record.searchKeywords || '')}" placeholder="คำสะกดอื่นหรือคำที่ลูกค้ามักใช้"></label><label class="full">หมายเหตุ<input id="fNote" value="${html(record.note || '')}"></label>${seal ? '' : `<label class="full">รายละเอียด<textarea id="fDescription">${html(record.description || '')}</textarea></label>`}<label class="full">URL รูป<input id="fImageUrl" value="${html(record.imageUrl || '')}"></label><label class="full">อัปโหลดรูป<input id="fImageFile" type="file" accept="image/*"></label></div><div class="chip-row" style="margin-top:14px">${seal ? '<button class="btn warning" id="wikiGalleryBtn">🖼 เลือกรูป Seal Master</button><button class="btn primary" id="wikiCenterRecordBtn">📚 ค้นหน้าข้อมูล DMO Wiki</button>' : ''}<button class="btn success" id="saveRecordBtn">บันทึก</button><button class="btn" id="closeModalBtn">ยกเลิก</button></div></div></div>`;
+  const tMoney=record.kind==='TMONEY';
+  return `<div class="modal-backdrop" id="modalBackdrop"><div class="modal"><h2>${record.id ? 'แก้ไข' : 'เพิ่ม'}${seal ? 'ซีล' : service ? 'บริการ' : tMoney ? 'เงิน T' : 'ไอเทม'}</h2><div class="form-grid"><label>ชื่อ<input id="fName" value="${html(record.name || '')}" ${tMoney?'readonly':''}></label><label>ชื่อค้นหาเพิ่มเติม<input id="fAliases" value="${html(Array.isArray(record.aliases) ? record.aliases.join('|') : record.aliases || '')}" placeholder="คั่นด้วย |"></label>${seal ? `<label>สาย<select id="fCategory">${['AT', 'HT', 'CT', 'HP', 'DS', 'DE', 'EV', 'BL'].map((category) => `<option ${record.category === category ? 'selected' : ''}>${category}</option>`).join('')}</select></label><label>ประเภท<select id="fSection">${['NORMAL', 'BASE_HARD', 'SUSA'].map((section) => `<option value="${section}" ${record.section === section ? 'selected' : ''}>${sectionLabel(section)}</option>`).join('')}</select></label><label>ชื่ออังกฤษ/คำค้น DMO Wiki<input id="fWikiName" value="${html(record.wikiName || '')}" placeholder="เช่น Agumon"></label><label>ชื่อหน้าที่เชื่อม<input id="fWikiTitle" value="${html(record.wikiTitle || '')}" placeholder="เชื่อมผ่าน DMO Wiki Center"></label><label class="full">URL DMO Wiki<input id="fWikiUrl" value="${html(record.wikiUrl || '')}"></label>` : service ? `<label>หมวดบริการ<input id="fServiceCategory" value="${html(record.serviceCategory || '')}" placeholder="เช่น ดันเจียน / เควสต์"></label>` : tMoney ? '<div class="security-note">สินค้าเงิน T มีได้หนึ่งรายการ ระบบใช้ Rate × จำนวน T และตรวจ Stock ฝั่ง Server</div>' : `<label>หมวดไอเทม<input id="fItemCategory" value="${html(record.itemCategory || '')}"></label>`}<label>${tMoney?'Rate (บาท/T)':'ราคา'}<input id="fPrice" type="number" step="0.01" min="0" value="${html(record.price || 0)}"></label><label>หน่วย<input id="fUnit" value="${html(record.unit || (service ? 'ครั้ง' : tMoney ? 'T' : 'ชิ้น'))}" ${tMoney?'readonly':''}></label>${seal ? `<label>จำนวนต่อชุด<input id="fPackSize" type="number" value="${html(record.packSize || 1000)}"></label>` : ''}<label>สถานะ<select id="fStatus">${['ACTIVE', 'CHECK_STOCK', 'OUT_OF_STOCK', 'INACTIVE', 'HIDDEN'].map((status) => `<option ${record.status === status ? 'selected' : ''}>${status}</option>`).join('')}</select></label><label>สต๊อกทั้งหมด (เว้นว่าง = ตรวจสอบ)<input id="fStock" type="number" value="${record.stock === '' ? '' : html(record.stock)}"></label><label>จำนวนที่กันไว้<input id="fReservedStock" type="number" min="0" value="${html(record.reservedStock || 0)}"></label><label>แจ้งเตือนใกล้หมด<input id="fLowStockAlert" type="number" min="0" value="${html(record.lowStockAlert || 0)}"></label><label>ต้นทุนต่อหน่วย<input id="fCostPrice" type="number" step="0.01" min="0" value="${html(record.costPrice || '')}"></label><label>ลำดับแสดง<input id="fSort" type="number" value="${html(record.sortOrder || 10)}"></label><label>ป้ายสินค้า<input id="fBadge" value="${html(record.badge || '')}" placeholder="HOT / NEW / SALE"></label><label>แท็กค้นหา<input id="fTags" value="${html(record.tags || '')}" placeholder="PVP|ขายดี|ดิจิมอน X"></label><label class="full">คำค้นเพิ่มเติม<input id="fSearchKeywords" value="${html(record.searchKeywords || '')}" placeholder="คำสะกดอื่นหรือคำที่ลูกค้ามักใช้"></label><label class="full">หมายเหตุ<input id="fNote" value="${html(record.note || '')}"></label>${seal ? '' : `<label class="full">รายละเอียด<textarea id="fDescription">${html(record.description || '')}</textarea></label>`}<label class="full">URL รูป<input id="fImageUrl" value="${html(record.imageUrl || '')}"></label><label class="full">อัปโหลดรูป<input id="fImageFile" type="file" accept="image/*"></label></div><div class="chip-row" style="margin-top:14px">${seal ? '<button class="btn warning" id="wikiGalleryBtn">🖼 เลือกรูป Seal Master</button><button class="btn primary" id="wikiCenterRecordBtn">📚 ค้นหน้าข้อมูล DMO Wiki</button>' : ''}<button class="btn success" id="saveRecordBtn">บันทึก</button><button class="btn" id="closeModalBtn">ยกเลิก</button></div></div></div>`;
 }
 
 function wikiGalleryModal() {
@@ -971,17 +1103,17 @@ function wikiGalleryModal() {
 }
 
 function adminBootstrapData() {
-  return {seals:state.seals||[],gameItems:state.items||[],services:state.services||[],settings:state.settings||{},orders:[],deletedOrders:[],orderItems:[],logs:[],stockLogs:[],stockUpdatedAt:'',customers:[],customerInteractions:[],promotions:state.promotions||[],trash:[],security:{actor:state.adminUser||{}},automation:{},databaseVersion:''};
+  return {seals:state.seals||[],gameItems:state.items||[],services:state.services||[],moneyT:state.moneyT||null,settings:state.settings||{},orders:[],deletedOrders:[],orderItems:[],logs:[],stockLogs:[],stockUpdatedAt:'',customers:[],customerInteractions:[],promotions:state.promotions||[],trash:[],security:{actor:state.adminUser||{}},automation:{},databaseVersion:''};
 }
 
 async function loadAdmin(force = true) {
-  if (state.adminLoading) return;
+  if (state.adminLoading) return adminLoadPromise;
   if (!force && state.adminData && state.adminLoadedAt && Date.now() - state.adminLoadedAt < 30000) { render(); return; }
   state.adminLoading = true;
   if (!state.adminData) { state.adminData = adminBootstrapData(); render(); }
-  try {
+  adminLoadPromise=(async()=>{try {
     const data = await apiPost({action:'getAdminData',token:state.adminToken});
-    state.adminData = { seals: data.seals || [], gameItems: data.gameItems || [], services: data.services || [], settings: data.settings || {}, orders: data.orders || [], deletedOrders:data.deletedOrders||[], orderItems:data.orderItems||[], logs: data.logs || [], stockLogs: data.stockLogs || [], stockUpdatedAt:data.stockUpdatedAt||'', customers: data.customers || [], customerInteractions:data.customerInteractions||[], promotions: data.promotions || [], trash: data.trash || [], security: data.security || {}, automation: data.automation || {}, databaseVersion:data.databaseVersion||'' };
+    state.adminData = { seals: data.seals || [], gameItems: data.gameItems || [], services: data.services || [], moneyT:data.moneyT||null, settings: data.settings || {}, orders: data.orders || [], deletedOrders:data.deletedOrders||[], orderItems:data.orderItems||[], logs: data.logs || [], stockLogs: data.stockLogs || [], stockUpdatedAt:data.stockUpdatedAt||'', customers: data.customers || [], customerInteractions:data.customerInteractions||[], promotions: data.promotions || [], trash: data.trash || [], security: data.security || {}, automation: data.automation || {}, databaseVersion:data.databaseVersion||'' };
     state.adminLoadedAt = Date.now();
     if(data.security&&data.security.actor){state.adminUser={...(state.adminUser||{}),...data.security.actor};sessionStorage.setItem('dmo_admin_user',JSON.stringify(state.adminUser));}
     render();
@@ -993,8 +1125,9 @@ async function loadAdmin(force = true) {
     toast(error.message);
     render();
   } finally {
-    state.adminLoading = false;
-  }
+    state.adminLoading = false;adminLoadPromise=null;
+  }})();
+  return adminLoadPromise;
 }
 
 async function saveRecordAction() {
@@ -1002,6 +1135,7 @@ async function saveRecordAction() {
     const old = state.editRecord;
     const seal = old.kind === 'SEAL';
     const service = old.kind === 'SERVICE';
+    const tMoney = old.kind === 'TMONEY';
     let imageUrl = document.getElementById('fImageUrl').value.trim();
     const file = document.getElementById('fImageFile').files[0];
     if (file) {
@@ -1036,6 +1170,7 @@ async function saveRecordAction() {
     } else {
       record.description = document.getElementById('fDescription').value.trim();
       if (service) record.serviceCategory = document.getElementById('fServiceCategory').value.trim();
+      else if(tMoney){record.name='เงิน T';record.itemCategory='MONEY_T';record.unit='T';}
       else record.itemCategory = document.getElementById('fItemCategory').value.trim();
     }
     await apiPost({ action: 'upsert', token: state.adminToken, record });
@@ -1061,6 +1196,30 @@ function uploadFile(file) {
     reader.onerror = () => reject(Error('อ่านไฟล์รูปไม่สำเร็จ'));
     reader.readAsDataURL(file);
   });
+}
+
+function fileAsBase64(file,errorMessage='อ่านไฟล์ไม่สำเร็จ'){
+  return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]||'');reader.onerror=()=>reject(Error(errorMessage));reader.readAsDataURL(file);});
+}
+async function selectImageZip(file){
+  if(!file)return;
+  if(!/\.zip$/i.test(file.name))return toast('กรุณาเลือกไฟล์ .zip');
+  if(file.size>8*1024*1024)return toast('ZIP ต้องมีขนาดไม่เกิน 8 MB');
+  try{state.imageManager={zipData:await fileAsBase64(file,'อ่านไฟล์ ZIP ไม่สำเร็จ'),fileName:file.name,preview:null,applying:false,allowOverwrite:false,lastResult:null,requestId:''};render();toast('อ่าน ZIP แล้ว กรุณากด Preview');}catch(error){toast(error.message);}
+}
+async function previewImageZipAction(){
+  const manager=state.imageManager;if(manager.applying||!manager.zipData)return;
+  try{manager.applying=true;manager.preview=null;render();const preview=await apiPost({action:'previewImageZip',token:state.adminToken,zipData:manager.zipData,fileName:manager.fileName});manager.preview=preview;manager.requestId=crypto.randomUUID?crypto.randomUUID():`IMG-${Date.now()}-${Math.random().toString(16).slice(2)}`;toast(`Preview สำเร็จ: Match ${preview.summary.match} รูป`);}catch(error){toast(error.message);}finally{manager.applying=false;render();}
+}
+async function applyImageZipAction(){
+  const manager=state.imageManager,preview=manager.preview;if(manager.applying||!preview)return;
+  if((preview.conflicts||[]).length)return toast('กรุณาแก้ Conflict ก่อน Apply');
+  if(manager.allowOverwrite&&Number(preview.summary.overwrite||0)>0&&!confirm(`ยืนยันเขียนทับรูปเดิม ${preview.summary.overwrite} รายการ?\nระบบจะ Backup mapping ก่อนทุกครั้ง`))return;
+  if(!confirm(`ยืนยัน Apply รูปที่ Match ${preview.summary.match} รายการ?\nไฟล์ที่ไม่ตรงจะไม่ถูกนำเข้า`))return;
+  try{manager.applying=true;render();const result=await apiPost({action:'applyImageZip',token:state.adminToken,zipData:manager.zipData,fileName:manager.fileName,zipHash:preview.zipHash,requestId:manager.requestId,allowOverwrite:manager.allowOverwrite,overwriteConfirmation:manager.allowOverwrite?'OVERWRITE_CONFIRMED':''});state.imageManager={zipData:'',fileName:'',preview:null,applying:false,allowOverwrite:false,lastResult:result,requestId:''};await loadAdmin(true);state.publicLoadedAt=0;await loadData(false);toast(`Apply รูปสำเร็จ ${result.applied} รายการ`);}catch(error){manager.applying=false;toast(error.message);render();}
+}
+function downloadMissingImageReport(){
+  const rows=(state.imageManager.preview&&state.imageManager.preview.missingProducts)||[];if(!rows.length)return toast('ไม่มีรายการสินค้าที่ขาดรูป');csvDownload(`missing-images-${new Date().toISOString().slice(0,10)}.csv`,['kind','productId','productName'],rows.map(x=>[x.kind,x.id,x.name]));
 }
 
 async function openWikiGallery() {
@@ -1118,8 +1277,12 @@ async function saveSettingsAction() {
       promoThreshold: Number(document.getElementById('setThreshold').value) || 100,
       promoReward: Number(document.getElementById('setReward').value) || 150,
       autoRefreshSeconds: Number(document.getElementById('setRefresh').value) || 60,
+      orderSubmitCooldownSeconds: Math.max(5,Math.min(120,Number(document.getElementById('setOrderCooldown').value)||30)),
+      orderRateWindowSeconds: Math.max(60,Math.min(3600,Number(document.getElementById('setOrderRateWindow').value)||300)),
+      orderRateMax: Math.max(1,Math.min(10,Number(document.getElementById('setOrderRateMax').value)||3)),
       facebookUrl: document.getElementById('setFacebook').value,
       lineUrl: document.getElementById('setLine').value,
+      servicePosterUrl: document.getElementById('setServicePoster').value,
       orderNotice: document.getElementById('setNotice').value,
       allowOrderSave: document.getElementById('setAllowOrder').checked ? 'TRUE' : 'FALSE',
       showStock: document.getElementById('setShowStock').checked ? 'TRUE' : 'FALSE',
@@ -1137,7 +1300,7 @@ async function saveSettingsAction() {
 
 async function adjustStockAction(kind, id, delta) {
   if(state.stockActionPending)return;
-  const product = (kind === 'SEAL' ? state.adminData.seals : state.adminData.gameItems).find((entry) => entry.id === id);
+  const product = (kind === 'SEAL' ? state.adminData.seals : kind==='TMONEY'?[state.adminData.moneyT]:state.adminData.gameItems).find((entry) => entry&&entry.id === id);
   if(!product)return toast('ไม่พบสินค้า');
   const reason = prompt(`เหตุผลในการ${delta >= 0 ? 'เพิ่ม' : 'ลด'}สต๊อก ${product.name}`, delta >= 0 ? 'เติมของเข้า' : 'ขาย/นำออก');
   if (reason === null) return;
@@ -1155,7 +1318,7 @@ async function adjustStockAction(kind, id, delta) {
 
 async function setStockAction(kind, id) {
   if(state.stockActionPending)return;
-  const product = (kind === 'SEAL' ? state.adminData.seals : state.adminData.gameItems).find((entry) => entry.id === id);
+  const product = (kind === 'SEAL' ? state.adminData.seals : kind==='TMONEY'?[state.adminData.moneyT]:state.adminData.gameItems).find((entry) => entry&&entry.id === id);
   if (!product) return;
   const stockTextValue = prompt(`กำหนดสต๊อกทั้งหมดของ ${product.name}\nเว้นว่าง = ต้องตรวจสอบสต๊อก`, product.stock === '' ? '' : product.stock);
   if (stockTextValue === null) return;
@@ -1185,7 +1348,7 @@ async function setStockAction(kind, id) {
 async function addStockFromForm(){
   if(state.stockActionPending)return;const selected=document.getElementById('stockAddProduct')?.value||'',amount=Number(document.getElementById('stockAddAmount')?.value),reason=String(document.getElementById('stockAddReason')?.value||'').trim();
   if(!selected)return toast('กรุณาเลือกสินค้า');if(!Number.isFinite(amount)||amount<=0)return toast('จำนวนที่เพิ่มต้องมากกว่า 0');if(!Number.isInteger(amount))return toast('จำนวนที่เพิ่มต้องเป็นจำนวนเต็ม');if(!reason)return toast('กรุณาระบุเหตุผล');
-  const [kind,id]=selected.split('|'),list=kind==='SEAL'?state.adminData.seals:state.adminData.gameItems,product=list.find(x=>String(x.id)===String(id));if(!product)return toast('ไม่พบสินค้า');
+  const [kind,id]=selected.split('|'),list=kind==='SEAL'?state.adminData.seals:kind==='TMONEY'?[state.adminData.moneyT]:state.adminData.gameItems,product=list.find(x=>x&&String(x.id)===String(id));if(!product)return toast('ไม่พบสินค้า');
   const fingerprint=`ADD|${kind}|${id}|${amount}|${reason}`;if(state.stockConfirmFingerprint!==fingerprint){state.stockConfirmFingerprint=fingerprint;state.stockActionResult={message:`ยืนยันเพิ่ม ${product.name} ${money(amount)} ${product.unit||'ชิ้น'}?`,detail:'ตรวจสอบข้อมูล แล้วกด “ยืนยันเพิ่ม Stock” อีกครั้ง'};render();return;}
   const requestId=state.stockPendingRequests[fingerprint]||(state.stockPendingRequests[fingerprint]=crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(16).slice(2)}`);
   try{state.stockConfirmFingerprint='';state.stockActionPending='ADD_FORM';state.stockActionResult={message:'กำลังอัปเดต Stock กรุณารอสักครู่...',detail:product.name};render();const data=await apiPost({action:'adjustStock',token:state.adminToken,kind,id,delta:amount,reason,requestId});delete state.stockPendingRequests[fingerprint];state.stockAddDraft={product:'',amount:'',reason:'เติมของเข้า'};state.stockActionResult={message:data.duplicate?'คำขอนี้สำเร็จแล้ว ระบบไม่เพิ่มซ้ำ':'เพิ่ม Stock สำเร็จ',detail:`${data.productName}: เดิม ${money(data.beforeStock)} • เพิ่ม ${money(data.changeAmount)} • ใหม่ ${money(data.stock)} • ${new Date(data.updatedAt).toLocaleString('th-TH')}`};toast(state.stockActionResult.message);await loadAdmin(true);await loadData(false);}catch(error){state.stockActionResult={message:'ไม่สามารถอัปเดต Stock ได้ กรุณาลองใหม่',detail:error.message};toast(error.message);}finally{state.stockActionPending='';render();}
@@ -1198,38 +1361,40 @@ function addToCartSilent(product, quantity) {
   const max = productMaxQty(product);
   if (nextQuantity > max) {
     if (existing) existing.quantity = max;
-    else if (max > 0) state.cart.push({ id: product.id, name: product.name, price: Number(product.price) || 0, unit: saleUnit(product), kind: product.kind, quantity: max });
+    else if (max > 0) state.cart.push(cartProductSnapshot(product,max));
     toast(stockLimitMessage(product));
     return false;
   }
   if (existing) existing.quantity = nextQuantity;
-  else state.cart.push({ id: product.id, name: product.name, price: Number(product.price) || 0, unit: saleUnit(product), kind: product.kind, quantity });
+  else state.cart.push(cartProductSnapshot(product,quantity));
   return true;
 }
 
 function bind() {
-  document.querySelectorAll('[data-type]').forEach((button) => button.onclick = () => { state.catalogType = button.dataset.type; state.wishlistOnly=false; state.search = ''; state.selectedSearchKey = ''; render(); });
-  const favoritesBtn=document.getElementById('favoritesBtn');if(favoritesBtn)favoritesBtn.onclick=()=>{state.wishlistOnly=!state.wishlistOnly;render();};
+  document.querySelectorAll('[data-type]').forEach((button) => button.onclick = () => { state.catalogType = button.dataset.type; state.wishlistOnly=false; state.search = ''; state.selectedSearchKey = '';state.catalogVisible=60; render(); });
+  const favoritesBtn=document.getElementById('favoritesBtn');if(favoritesBtn)favoritesBtn.onclick=()=>{state.wishlistOnly=!state.wishlistOnly;state.catalogVisible=60;render();};
   const repeatLatestBtn=document.getElementById('repeatLatestBtn');if(repeatLatestBtn)repeatLatestBtn.onclick=()=>repeatOrder(state.recentOrders[0]);
   document.querySelectorAll('[data-repeat-order]').forEach((button)=>button.onclick=()=>repeatOrder(state.recentOrders[Number(button.dataset.repeatOrder)]));
   document.querySelectorAll('[data-favorite]').forEach((button)=>button.onclick=()=>{const [kind,id]=button.dataset.favorite.split('|');const p=allProducts().find((x)=>x.kind===kind&&x.id===id);if(p)toggleFavorite(p);});
-  document.querySelectorAll('[data-cat]').forEach((button) => button.onclick = () => { state.category = button.dataset.cat; state.selectedSearchKey = ''; render(); });
-  document.querySelectorAll('[data-sec]').forEach((button) => button.onclick = () => { state.section = button.dataset.sec; state.selectedSearchKey = ''; render(); });
+  document.querySelectorAll('[data-cat]').forEach((button) => button.onclick = () => { state.category = button.dataset.cat; state.selectedSearchKey = '';state.catalogVisible=60; render(); });
+  document.querySelectorAll('[data-sec]').forEach((button) => button.onclick = () => { state.section = button.dataset.sec; state.selectedSearchKey = '';state.catalogVisible=60; render(); });
   const refresh = document.getElementById('refreshBtn'); if (refresh) refresh.onclick = () => loadData(true);
-  const search = document.getElementById('searchInput'); if (search) { search.oninput = (event) => { state.search = event.target.value; state.selectedSearchKey = ''; scheduleInputRender('searchInput', 80); }; search.onkeydown = (event) => { if (event.key === 'Enter') { clearTimeout(inputRenderTimer); state.selectedSearchKey = ''; rememberSearch(state.search); render(); } }; }
-  const searchClear = document.getElementById('searchClearBtn'); if (searchClear) searchClear.onclick = () => { state.search = ''; state.selectedSearchKey = ''; render(); };
+  const search = document.getElementById('searchInput'); if (search) { search.oninput = (event) => { state.search = event.target.value; state.selectedSearchKey = '';state.catalogVisible=60; scheduleInputRender('searchInput', 120); }; search.onkeydown = (event) => { if (event.key === 'Enter') { clearTimeout(inputRenderTimer); state.selectedSearchKey = ''; rememberSearch(state.search); render(); } }; }
+  const searchClear = document.getElementById('searchClearBtn'); if (searchClear) searchClear.onclick = () => { state.search = ''; state.selectedSearchKey = '';state.catalogVisible=60; render(); };
   document.querySelectorAll('[data-search-suggestion]').forEach((button) => button.onclick = () => { state.search = button.dataset.searchSuggestion; state.selectedSearchKey = button.dataset.searchProduct || ''; rememberSearch(state.search); render(); });
   document.querySelectorAll('[data-recent-search]').forEach((button) => button.onclick = () => { state.search = button.dataset.recentSearch; state.selectedSearchKey = ''; render(); });
   const clearRecent = document.getElementById('clearRecentSearches'); if (clearRecent) clearRecent.onclick = () => { state.recentSearches = []; localStorage.removeItem('dmo_recent_searches'); render(); };
+  const loadMoreProductsBtn=document.getElementById('loadMoreProductsBtn');if(loadMoreProductsBtn)loadMoreProductsBtn.onclick=()=>{state.catalogVisible+=60;render();};
+  const emptyResetBtn=document.getElementById('emptyResetBtn');if(emptyResetBtn)emptyResetBtn.onclick=()=>{state.search='';state.selectedSearchKey='';state.category='ALL';state.section='ALL';state.catalogVisible=60;render();};
   document.querySelectorAll('[data-add]').forEach((button) => button.onclick = () => { const quantity = document.querySelector(`[data-qty="${CSS.escape(button.dataset.add)}"]`); addToCart(button.dataset.add, quantity && quantity.value); });
   document.querySelectorAll('[data-inc]').forEach((button) => button.onclick = () => { const item = state.cart.find((entry) => entry.id === button.dataset.inc); const product=item&&allProducts().find((entry)=>entry.id===item.id&&entry.kind===item.kind); if(item&&product){if(item.quantity>=productMaxQty(product))toast(stockLimitMessage(product));else item.quantity+=1;} render(); });
   document.querySelectorAll('[data-dec]').forEach((button) => button.onclick = () => { const item = state.cart.find((entry) => entry.id === button.dataset.dec); if (item) { item.quantity -= 1; if (item.quantity <= 0) state.cart = state.cart.filter((entry) => entry.id !== item.id); } render(); });
   document.querySelectorAll('[data-remove]').forEach((button) => button.onclick = () => { state.cart = state.cart.filter((entry) => entry.id !== button.dataset.remove); render(); });
   ['tamer', 'contact'].forEach((id) => { const input = document.getElementById(id); if (input) input.oninput = (event) => { state.customer[id] = event.target.value; }; });
   const clear = document.getElementById('clearCartBtn'); if (clear) clear.onclick = () => { state.cart = []; render(); };
-  const copy = document.getElementById('copyOnlyBtn'); if (copy) copy.onclick = () => {saveRecentOrderSnapshot();copyText(orderText(customerValues()),'คัดลอกแล้ว กรุณานำข้อความไปวางในแชต Facebook ของร้าน');};
+  const copy = document.getElementById('copyOnlyBtn'); if (copy) copy.onclick = async () => {if(copy.disabled)return;copy.disabled=true;try{saveRecentOrderSnapshot();await copyText(orderText(customerValues()),'คัดลอกแล้ว นำรายการไปวางในแชต Facebook ของร้านได้เลย');state.copyNotice='คัดลอกแล้ว นำรายการไปวางในแชต Facebook ของร้านได้เลย';render();}catch(error){toast('คัดลอกไม่สำเร็จ กรุณาลองใหม่');}finally{if(copy.isConnected)copy.disabled=false;}};
   const favoriteCart=document.getElementById('favoriteCartBtn');if(favoriteCart)favoriteCart.onclick=()=>{state.cart.forEach((item)=>{const p=allProducts().find((x)=>x.id===item.id&&x.kind===item.kind);if(p&&!isFavorite(p))state.favoriteKeys.push(productKey(p));});state.favoriteKeys=[...new Set(state.favoriteKeys)].slice(0,300);localStorage.setItem('dmo_favorites',JSON.stringify(state.favoriteKeys));toast('บันทึกรายการโปรดแล้ว');render();};
-  const saveOrder = document.getElementById('saveOrderBtn'); if (saveOrder) saveOrder.onclick = async () => { if(state.orderSubmitting)return;try { const customer = customerValues(); if(!customer.tamer.trim()) throw Error('กรุณากรอกชื่อเทมเมอร์'); if(!customer.contact.trim()) throw Error('กรุณากรอกชื่อ Facebook'); if(!state.cart.length) throw Error('ยังไม่มีสินค้าในรายการ');const fingerprint=JSON.stringify({customer,items:state.cart.map(x=>({id:x.id,kind:x.kind,quantity:x.quantity}))});if(state.pendingOrderFingerprint!==fingerprint){state.pendingOrderFingerprint=fingerprint;state.pendingOrderRequestId=(crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(16).slice(2)}`);}state.orderSubmitting=true;render();const data = await apiPost({ action: 'createOrder', requestId:state.pendingOrderRequestId, customer, items: state.cart }); if(!data.orderId) throw Error('ระบบยังไม่เปิดรับออเดอร์ กรุณาติดต่อร้าน'); saveRecentOrderSnapshot(data.orderId); state.orderSuccess={orderId:data.orderId,total:Number(data.total||0),discount:Number(data.discount||0)}; state.cart=[];state.pendingOrderRequestId='';state.pendingOrderFingerprint='';state.orderSubmitting=false;render(); window.scrollTo({top:0,behavior:'smooth'}); } catch (error) { state.orderSubmitting=false;render();toast(error.message); } };
+  const saveOrder = document.getElementById('saveOrderBtn'); if (saveOrder) saveOrder.onclick = async () => { if(state.orderSubmitting)return;try { const remaining=Math.ceil((state.orderCooldownUntil-Date.now())/1000);if(remaining>0)throw Error(`กรุณารอ ${remaining} วินาทีก่อนส่งออเดอร์ใหม่`);const customer = customerValues(); if(!customer.tamer.trim()) throw Error('กรุณากรอกชื่อเทมเมอร์'); if(!customer.contact.trim()) throw Error('กรุณากรอกชื่อ Facebook'); if(!state.cart.length) throw Error('ยังไม่มีสินค้าในรายการ');const fingerprint=JSON.stringify({customer,items:state.cart.map(x=>({id:x.id,kind:x.kind,quantity:x.quantity}))});if(state.pendingOrderFingerprint!==fingerprint){state.pendingOrderFingerprint=fingerprint;state.pendingOrderRequestId=(crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(16).slice(2)}`);}const website=document.getElementById('orderWebsite')?.value||'';state.orderSubmitting=true;render();const data = await apiPost({ action: 'createOrder', requestId:state.pendingOrderRequestId, customer, items: state.cart, website, startedAt:state.orderFormStartedAt }); if(!data.orderId) throw Error('ระบบยังไม่เปิดรับออเดอร์ กรุณาติดต่อร้าน'); saveRecentOrderSnapshot(data.orderId); state.orderSuccess={orderId:data.orderId,total:Number(data.total||0),discount:Number(data.discount||0)};const cooldown=Math.max(5,Math.min(120,Number(state.settings.orderSubmitCooldownSeconds)||30));state.orderCooldownUntil=Date.now()+cooldown*1000;localStorage.setItem('dmo_order_cooldown_until',String(state.orderCooldownUntil));state.orderFormStartedAt=Date.now();state.cart=[];state.pendingOrderRequestId='';state.pendingOrderFingerprint='';state.orderSubmitting=false;render();setTimeout(()=>{if(state.page==='shop')render();},cooldown*1000+100);window.scrollTo({top:0,behavior:'smooth'}); } catch (error) { state.orderSubmitting=false;render();toast(error.message); } };
   const adminEntry = document.getElementById('adminEntry'); if (adminEntry) adminEntry.onclick = () => { state.page = 'admin'; location.hash = 'admin'; if (state.adminToken) loadAdmin(false); else render(); };
   const backShop = document.getElementById('backShopBtn'); if (backShop) backShop.onclick = () => { state.page = 'shop'; location.hash = ''; render(); };
   const login = document.getElementById('loginBtn'); if (login) login.onclick = async () => { if(state.loginSubmitting)return;const adminId=document.getElementById('adminId').value,password=document.getElementById('adminPassword').value;state.loginSubmitting=true;render();try { const data = await apiPost({ action: 'login', adminId, password }); state.loginSubmitting=false;state.adminToken = data.token; state.adminUser=data.user||null;state.adminData=adminBootstrapData();state.adminLoadedAt=0; state.lastAdminActivity=Date.now(); sessionStorage.setItem('dmo_admin_token', data.token); sessionStorage.setItem('dmo_admin_user',JSON.stringify(state.adminUser)); sessionStorage.setItem('dmo_admin_activity',String(state.lastAdminActivity));render();await loadAdmin(true); } catch (error) { state.loginSubmitting=false;render();toast(error.message); } };
@@ -1237,10 +1402,15 @@ function bind() {
   document.querySelectorAll('[data-admin-view]').forEach((button) => button.onclick = () => { state.adminView = button.dataset.adminView; render(); });
   const runIntegrityBtn=document.getElementById('runIntegrityBtn');if(runIntegrityBtn)runIntegrityBtn.onclick=async()=>{try{runIntegrityBtn.disabled=true;runIntegrityBtn.textContent='กำลังตรวจ...';const data=await apiPost({action:'runIntegrityCheck',token:state.adminToken});state.integrityReport=data.integrity||null;render();}catch(e){toast(e.message);render();}};
   document.querySelectorAll('[data-new]').forEach((button) => button.onclick = () => { const kind = button.dataset.new; state.editRecord = { kind, status: 'ACTIVE', category: 'AT', section: 'NORMAL', unit: kind === 'SEAL' ? 'ชุด' : kind === 'SERVICE' ? 'ครั้ง' : 'ชิ้น', packSize: 1000, sortOrder: 10, stock: '', reservedStock: 0, lowStockAlert: 0, costPrice: '' }; render(); });
-  document.querySelectorAll('[data-edit]').forEach((button) => button.onclick = () => { const [kind, id] = button.dataset.edit.split('|'); const list = kind === 'SEAL' ? state.adminData.seals : kind === 'SERVICE' ? state.adminData.services : state.adminData.gameItems; state.editRecord = { ...list.find((entry) => entry.id === id) }; render(); });
+  document.querySelectorAll('[data-edit]').forEach((button) => button.onclick = () => { const [kind, id] = button.dataset.edit.split('|'); const list = kind === 'SEAL' ? state.adminData.seals : kind === 'SERVICE' ? state.adminData.services : kind === 'TMONEY' ? [state.adminData.moneyT] : state.adminData.gameItems; state.editRecord = { ...list.find((entry) => entry&&entry.id === id) }; render(); });
   document.querySelectorAll('[data-delete]').forEach((button) => button.onclick = async () => { const [kind, id] = button.dataset.delete.split('|'); if (!confirm('ย้ายรายการนี้ลงถังขยะ?')) return; try { await apiPost({ action: 'softDelete', token: state.adminToken, kind, id }); state.adminSelected=state.adminSelected.filter((x)=>x!==`${kind}|${id}`); toast('ย้ายลงถังขยะแล้ว'); await loadAdmin(); await loadData(false); } catch (error) { toast(error.message); } });
   const adminSearch = document.getElementById('adminSearch'); if (adminSearch) adminSearch.oninput = (event) => document.querySelectorAll('[data-admin-name]').forEach((el) => { el.style.display = el.dataset.adminName.includes(norm(event.target.value)) ? '' : 'none'; });
   const adminCatalogSearch = document.getElementById('adminCatalogSearch'); if (adminCatalogSearch) adminCatalogSearch.oninput = (event) => { state.adminCatalogSearch = event.target.value; scheduleInputRender('adminCatalogSearch', 80); };
+  const imageZipInput=document.getElementById('imageZipInput');if(imageZipInput)imageZipInput.onchange=()=>selectImageZip(imageZipInput.files&&imageZipInput.files[0]);
+  const previewImageZipBtn=document.getElementById('previewImageZipBtn');if(previewImageZipBtn)previewImageZipBtn.onclick=previewImageZipAction;
+  const applyImageZipBtn=document.getElementById('applyImageZipBtn');if(applyImageZipBtn)applyImageZipBtn.onclick=applyImageZipAction;
+  const allowImageOverwrite=document.getElementById('allowImageOverwrite');if(allowImageOverwrite)allowImageOverwrite.onchange=()=>{state.imageManager.allowOverwrite=allowImageOverwrite.checked;};
+  const downloadMissingImagesBtn=document.getElementById('downloadMissingImagesBtn');if(downloadMissingImagesBtn)downloadMissingImagesBtn.onclick=downloadMissingImageReport;
   document.querySelectorAll('[data-admin-kind]').forEach((button)=>button.onclick=()=>{state.adminKindFilter=button.dataset.adminKind;state.adminSelected=[];render();});
   document.querySelectorAll('[data-select-product]').forEach((box)=>box.onchange=()=>{const key=box.dataset.selectProduct;if(box.checked&&!state.adminSelected.includes(key))state.adminSelected.push(key);if(!box.checked)state.adminSelected=state.adminSelected.filter((x)=>x!==key);render();});
   const selectAllProducts=document.getElementById('selectAllProducts');if(selectAllProducts)selectAllProducts.onchange=()=>{const keys=[...document.querySelectorAll('[data-select-product]')].map((x)=>x.dataset.selectProduct);state.adminSelected=selectAllProducts.checked?keys:state.adminSelected.filter((x)=>!keys.includes(x));render();};
@@ -1265,12 +1435,14 @@ function bind() {
   document.querySelectorAll('[data-order-mode]').forEach((button)=>button.onclick=()=>{state.adminOrderMode=button.dataset.orderMode;state.adminOrderFilter='ALL';render();});
   const adminOrderSearch=document.getElementById('adminOrderSearch');if(adminOrderSearch)adminOrderSearch.oninput=(event)=>{state.adminOrderSearch=event.target.value;scheduleInputRender('adminOrderSearch',100);};
   document.querySelectorAll('[data-pick-item]').forEach((button)=>button.onclick=async()=>{if(state.adminActionPending)return;const [orderItemId,pickStatus]=button.dataset.pickItem.split('|'),orderId=button.dataset.orderId||orderItemId;try{state.adminActionPending=orderId;render();await apiPost({action:'updateOrderItemPick',token:state.adminToken,orderItemId,pickStatus});toast('อัปเดตรายการจัดของแล้ว');await loadAdmin();}catch(e){toast(e.message);}finally{state.adminActionPending='';render();}});
+  document.querySelectorAll('[data-spam-order]').forEach((button)=>button.onclick=async()=>{if(state.adminActionPending)return;const [orderId,spamStatus]=button.dataset.spamOrder.split('|');let spamNote='';if(spamStatus==='SPAM'){spamNote=prompt('ระบุเหตุผลที่ทำเครื่องหมาย Spam','ส่งซ้ำ/ข้อความผิดปกติ')||'';if(!spamNote.trim())return;}if(!confirm(spamStatus==='SPAM'?'ทำเครื่องหมายออเดอร์นี้เป็น Spam?\nระบบจะไม่เปลี่ยน Stock หรือ Reserved':'ยกเลิกเครื่องหมาย Spam?'))return;try{state.adminActionPending=orderId;render();await apiPost({action:'markOrderSpam',token:state.adminToken,orderId,spamStatus,spamNote});toast(spamStatus==='SPAM'?'ทำเครื่องหมาย Spam แล้ว':'ยกเลิก Spam แล้ว');await loadAdmin();}catch(e){toast(e.message);}finally{state.adminActionPending='';render();}});
   document.querySelectorAll('[data-archive-order]').forEach(button=>button.onclick=()=>archiveOrderFromAdmin(button.dataset.archiveOrder));
   document.querySelectorAll('[data-restore-order]').forEach(button=>button.onclick=()=>restoreOrderFromAdmin(button.dataset.restoreOrder));
   const reloadOrdersBtn=document.getElementById('reloadOrdersBtn');if(reloadOrdersBtn)reloadOrdersBtn.onclick=()=>loadAdmin();
   const closeOrderSuccessBtn=document.getElementById('closeOrderSuccessBtn');if(closeOrderSuccessBtn)closeOrderSuccessBtn.onclick=()=>{state.orderSuccess=null;render();};
   const copyOrderSuccessBtn=document.getElementById('copyOrderSuccessBtn');if(copyOrderSuccessBtn)copyOrderSuccessBtn.onclick=()=>copyText(state.orderSuccess?.orderId||'','คัดลอกเลขออเดอร์แล้ว กรุณาส่งให้ร้านทาง Facebook');
   const saveSettings = document.getElementById('saveSettingsBtn'); if (saveSettings) saveSettings.onclick = saveSettingsAction;
+  const copyFacebookPostBtn=document.getElementById('copyFacebookPostBtn');if(copyFacebookPostBtn)copyFacebookPostBtn.onclick=()=>copyText(document.getElementById('facebookPostPreview')?.value||facebookPostText(),'คัดลอกข้อความโพสต์ Facebook แล้ว');
   document.querySelectorAll('[data-toggle-password]').forEach((button)=>button.onclick=()=>{const input=document.getElementById(button.dataset.togglePassword);if(!input)return;const show=input.type==='password';input.type=show?'text':'password';button.textContent=show?'ซ่อน':'แสดง';});
   const changeOwnerPasswordBtn=document.getElementById('changeOwnerPasswordBtn');if(changeOwnerPasswordBtn)changeOwnerPasswordBtn.onclick=async()=>{if(state.adminActionPending)return;const currentPassword=document.getElementById('ownerCurrentPassword').value,newPassword=document.getElementById('ownerNewPassword').value,confirmPassword=document.getElementById('ownerConfirmPassword').value;if(newPassword.length<10)return toast('รหัสผ่านใหม่ต้องมีอย่างน้อย 10 ตัวอักษร');if(newPassword!==confirmPassword)return toast('รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน');try{state.adminActionPending='OWNER_PASSWORD';changeOwnerPasswordBtn.disabled=true;changeOwnerPasswordBtn.textContent='กำลังเปลี่ยนรหัสผ่าน...';const data=await apiPost({action:'changeOwnerPassword',token:state.adminToken,currentPassword,newPassword,confirmPassword});state.adminToken='';state.adminData=null;state.adminUser=null;sessionStorage.removeItem('dmo_admin_token');sessionStorage.removeItem('dmo_admin_user');sessionStorage.removeItem('dmo_admin_activity');render();toast(data.message||'เปลี่ยนรหัสผ่านสำเร็จ กรุณาเข้าสู่ระบบอีกครั้ง');}catch(e){toast(e.message);}finally{state.adminActionPending='';}};
   const reloadInventory = document.getElementById('reloadInventoryBtn'); if (reloadInventory) reloadInventory.onclick = () => loadAdmin();
