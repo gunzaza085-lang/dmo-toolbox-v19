@@ -1,0 +1,4 @@
+'use strict';
+const http=require('http'),fs=require('fs'),path=require('path');
+const root=path.resolve(__dirname,'..'),types={'.html':'text/html;charset=utf-8','.js':'text/javascript;charset=utf-8','.css':'text/css;charset=utf-8','.json':'application/json;charset=utf-8','.png':'image/png','.svg':'image/svg+xml','.ico':'image/x-icon'};
+http.createServer((req,res)=>{const pathname=new URL(req.url,'http://127.0.0.1').pathname,file=path.resolve(root,pathname==='/'?'index.html':pathname.slice(1));if(!file.startsWith(root)){res.writeHead(403);return res.end();}fs.readFile(file,(error,data)=>{if(error){res.writeHead(404);return res.end('Not found');}res.setHeader('Content-Type',types[path.extname(file)]||'application/octet-stream');res.setHeader('Cache-Control','no-store');res.end(data);});}).listen(4173,'127.0.0.1',()=>console.log('TEST frontend ready at http://127.0.0.1:4173'));

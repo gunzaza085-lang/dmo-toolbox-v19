@@ -4,7 +4,7 @@
  * - Admin: Dashboard, calculator, catalog, orders, settings, logs
  * - DMO Wiki Seal Master image gallery + import to Google Drive
  */
-const SHEETS = { seals:'Seals', items:'Items', services:'Services', settings:'Settings', orders:'Orders', logs:'Logs', stockLogs:'StockLogs', stockRequests:'StockRequests', imageRequests:'ImageRequests', customers:'Customers', promotions:'Promotions', promotionProducts:'PromotionProducts', system:'System', trash:'Trash', wikiCache:'WikiCache', customerInteractions:'CustomerInteractions', reportSettings:'ReportSettings', users:'Users', sessions:'Sessions', backups:'Backups', notifications:'Notifications', orderItems:'OrderItems', orderRequests:'OrderRequests' };
+const SHEETS = { seals:'Seals', items:'Items', services:'Services', settings:'Settings', orders:'Orders', logs:'Logs', stockLogs:'StockLogs', stockRequests:'StockRequests', imageRequests:'ImageRequests', customers:'Customers', promotions:'Promotions', promotionProducts:'PromotionProducts', system:'System', trash:'Trash', wikiCache:'WikiCache', customerInteractions:'CustomerInteractions', reportSettings:'ReportSettings', users:'Users', sessions:'Sessions', backups:'Backups', notifications:'Notifications', orderItems:'OrderItems', orderRequests:'OrderRequests', facebookBumpPosts:'FacebookBumpPosts', facebookBumpQueue:'FacebookBumpQueue', facebookBumpHistory:'FacebookBumpHistory', facebookOwnedComments:'FacebookOwnedComments' };
 const HEADERS = {
   seals:['id','name','aliases','category','section','price','unit','packSize','status','stock','note','imageUrl','wikiName','badge','sortOrder','updatedAt','reservedStock','lowStockAlert','costPrice','wikiTitle','wikiUrl','wikiImageSource','tags','searchKeywords','wikiSyncedAt'],
   items:['id','name','aliases','itemCategory','price','unit','status','stock','note','description','imageUrl','badge','sortOrder','updatedAt','reservedStock','lowStockAlert','costPrice','tags','searchKeywords'],
@@ -28,7 +28,11 @@ const HEADERS = {
   backups:['backupId','createdAt','createdBy','reason','fileId','fileUrl','fileName','sizeBytes','status'],
   notifications:['notificationId','createdAt','type','severity','title','message','status','relatedId'],
   orderItems:['orderItemId','orderId','kind','productId','productName','quantity','unit','unitPrice','lineTotal','pickStatus','stockCheck','createdAt','updatedAt','packSize'],
-  orderRequests:['requestId','createdAt','orderId','contactHash','status','responseJson']
+  orderRequests:['requestId','createdAt','orderId','contactHash','status','responseJson'],
+  facebookBumpPosts:['id','name','postUrl','bumpMessage','intervalMinutes','enabled','lastRunAt','nextRunAt','lastStatus','createdAt','updatedAt','deletedAt'],
+  facebookBumpQueue:['jobId','targetPostId','postName','postUrl','message','scheduledAt','status','attempts','error','createdAt','updatedAt','source'],
+  facebookBumpHistory:['historyId','createdAt','targetPostId','postName','postUrl','action','message','result','commentId','cleanupResult','error','jobId'],
+  facebookOwnedComments:['id','targetPostId','externalCommentId','message','createdAt','deletedAt','status']
 };
 const DEFAULT_SETTINGS = {
   shopName:'GUN SHOP DMO', ownerName:'Natthananat Kawinwatthanakorn', promoThreshold:100, promoReward:150,
@@ -38,10 +42,12 @@ const DEFAULT_SETTINGS = {
   sessionDays:7, autoLockMinutes:30, apiKey:'',
   backupEnabled:'TRUE', backupHour:3, backupRetention:14, alertLowStock:'TRUE', alertNewOrders:'TRUE',
   themeDefault:'DARK', enablePWA:'TRUE', offlineCacheHours:12, mobileCompact:'TRUE', showMobileBottomNav:'TRUE',
-  orderSuccessMessage:'ส่งรายการให้ทางร้านเรียบร้อยแล้ว ทางร้านจะตรวจสอบสต๊อกและจัดรายการให้', orderPrefix:'GUN'
+  orderSuccessMessage:'ส่งรายการให้ทางร้านเรียบร้อยแล้ว ทางร้านจะตรวจสอบสต๊อกและจัดรายการให้', orderPrefix:'GUN',
+  facebookBumpDefaultInterval:60, facebookBumpDefaultMessage:'+', facebookBumpDelaySeconds:30,
+  facebookBumpCleanupOld:'TRUE', facebookBumpPaused:'FALSE', facebookBumpDryRun:'TRUE', facebookBumpMode:'DRY_RUN', facebookBumpNextJobAllowedAt:''
 };
 
-const DATABASE_VERSION='3.2.0';
+const DATABASE_VERSION='3.2.1';
 const MONEY_T_PRODUCT_ID='TMONEY-001';
 const MONEY_T_CATEGORY='MONEY_T';
 
@@ -78,12 +84,13 @@ function doPost(e){
     if(!session) throw Error('กรุณาเข้าสู่ระบบใหม่');
     const actor={userId:String(session.userId),role:String(session.role||'VIEWER')};
     if(PUBLIC_CACHE_MUTATIONS.includes(body.action))invalidatePublicCache();
-    const adminWriteActions=['upsert','delete','softDelete','restoreTrash','permanentDelete','bulkUpdate','saveSettings','uploadImage','previewImageZip','applyImageZip','importWikiImage','attachWikiMetadata','upsertPromotion','deletePromotion','createBackup','restoreBackup','setupBackupTrigger','deleteBackup','saveSecurityUser','adjustStock','setStock','syncStock','markOrderSpam'];
+    const adminWriteActions=['upsert','delete','softDelete','restoreTrash','permanentDelete','bulkUpdate','saveSettings','uploadImage','previewImageZip','applyImageZip','importWikiImage','attachWikiMetadata','upsertPromotion','deletePromotion','createBackup','restoreBackup','setupBackupTrigger','deleteBackup','saveSecurityUser','adjustStock','setStock','syncStock','markOrderSpam','saveFacebookBumpPost','deleteFacebookBumpPost','toggleFacebookBumpPost','queueFacebookBumpNow','cancelFacebookBumpJob','retryFacebookBumpJob','saveFacebookBumpSettings','pauseAllFacebookBumps','resumeAllFacebookBumps','ensureFacebookBumpTrigger','claimFacebookBumpJob','completeFacebookBumpJob','failFacebookBumpJob'];
     const staffWriteActions=['updateOrder','updateOrderItemPick','updateCustomer','addCustomerInteraction'];
     if(adminWriteActions.includes(body.action)) requireRole(body.token,['OWNER','ADMIN']);
     if(staffWriteActions.includes(body.action)) requireRole(body.token,['OWNER','ADMIN','STAFF']);
     switch(body.action){
       case'getAdminData': return output({ok:true,...readAdmin(actor)});
+      case'getFacebookBumpAdminData': return output({ok:true,facebookBump:getFacebookBumpData(actor)});
       case'upsert': return upsert(body.record,actor.userId);
       case'delete': return softDelete(body.kind,body.id,actor.userId);
       case'softDelete': return softDelete(body.kind,body.id,actor.userId);
@@ -117,6 +124,19 @@ function doPost(e){
       case'setupBackupTrigger': return setupBackupTriggerAction(body,actor);
       case'deleteBackup': return deleteBackupAction(body,actor);
       case'runIntegrityCheck': requireRole(body.token,['OWNER','ADMIN']);return output({ok:true,integrity:runIntegrityCheck()});
+      case'saveFacebookBumpPost': return saveFacebookBumpPost(body,actor);
+      case'deleteFacebookBumpPost': return deleteFacebookBumpPost(body,actor);
+      case'toggleFacebookBumpPost': return toggleFacebookBumpPost(body,actor);
+      case'queueFacebookBumpNow': return queueFacebookBumpNow(body,actor);
+      case'cancelFacebookBumpJob': return cancelFacebookBumpJob(body,actor);
+      case'retryFacebookBumpJob': return retryFacebookBumpJob(body,actor);
+      case'saveFacebookBumpSettings': return saveFacebookBumpSettings(body,actor);
+      case'pauseAllFacebookBumps': return setFacebookBumpGlobalPause(true,body,actor);
+      case'resumeAllFacebookBumps': return setFacebookBumpGlobalPause(false,body,actor);
+      case'ensureFacebookBumpTrigger': return ensureFacebookBumpTriggerAction(body,actor);
+      case'claimFacebookBumpJob': return claimFacebookBumpJob(body,actor);
+      case'completeFacebookBumpJob': return completeFacebookBumpJob(body,actor);
+      case'failFacebookBumpJob': return failFacebookBumpJob(body,actor);
       case'initialize': return output({ok:true,message:'ฐานข้อมูลพร้อมใช้งาน'});
       default: throw Error('ไม่รู้จักคำสั่ง');
     }
@@ -140,20 +160,27 @@ function ensureDatabase(){
   if(cache.get(cacheKey)==='TRUE')return;
   sheet(SHEETS.seals,HEADERS.seals); sheet(SHEETS.items,HEADERS.items); sheet(SHEETS.services,HEADERS.services);
   sheet(SHEETS.settings,HEADERS.settings); sheet(SHEETS.orders,HEADERS.orders); sheet(SHEETS.orderRequests,HEADERS.orderRequests); sheet(SHEETS.logs,HEADERS.logs); sheet(SHEETS.stockLogs,HEADERS.stockLogs); sheet(SHEETS.stockRequests,HEADERS.stockRequests);
-  sheet(SHEETS.customers,HEADERS.customers); sheet(SHEETS.customerInteractions,HEADERS.customerInteractions); sheet(SHEETS.promotions,HEADERS.promotions); sheet(SHEETS.promotionProducts,HEADERS.promotionProducts); sheet(SHEETS.system,HEADERS.system); sheet(SHEETS.trash,HEADERS.trash); sheet(SHEETS.wikiCache,HEADERS.wikiCache); sheet(SHEETS.reportSettings,HEADERS.reportSettings); sheet(SHEETS.users,HEADERS.users); sheet(SHEETS.sessions,HEADERS.sessions); sheet(SHEETS.backups,HEADERS.backups); sheet(SHEETS.notifications,HEADERS.notifications); sheet(SHEETS.orderItems,HEADERS.orderItems); sheet(SHEETS.imageRequests,HEADERS.imageRequests);
+  sheet(SHEETS.customers,HEADERS.customers); sheet(SHEETS.customerInteractions,HEADERS.customerInteractions); sheet(SHEETS.promotions,HEADERS.promotions); sheet(SHEETS.promotionProducts,HEADERS.promotionProducts); sheet(SHEETS.system,HEADERS.system); sheet(SHEETS.trash,HEADERS.trash); sheet(SHEETS.wikiCache,HEADERS.wikiCache); sheet(SHEETS.reportSettings,HEADERS.reportSettings); sheet(SHEETS.users,HEADERS.users); sheet(SHEETS.sessions,HEADERS.sessions); sheet(SHEETS.backups,HEADERS.backups); sheet(SHEETS.notifications,HEADERS.notifications); sheet(SHEETS.orderItems,HEADERS.orderItems); sheet(SHEETS.imageRequests,HEADERS.imageRequests); ensureFacebookBumpDatabase();
   seedSettings(); seedDefaultPromotions(); seedMoneyTProduct(); seedSystem(); seedSecurity(); migrateLegacy();
   cache.put(cacheKey,'TRUE',300);
 }
 function seedSettings(){
   const s=sheet(SHEETS.settings,HEADERS.settings), values=s.getDataRange().getValues(), keys=new Set(values.slice(1).map(r=>String(r[0])));
-  Object.keys(DEFAULT_SETTINGS).forEach(k=>{if(!keys.has(k))s.appendRow([k,DEFAULT_SETTINGS[k],'']);});
+  Object.keys(DEFAULT_SETTINGS).forEach(k=>{
+    const value=DEFAULT_SETTINGS[k],safeValue=typeof value==='string'?safeSheetText(value,5000):value;
+    if(!keys.has(k)){s.appendRow([k,safeValue,'']);return;}
+    if(k==='facebookBumpDefaultMessage'){
+      const rowIndex=values.findIndex((row,index)=>index>0&&String(row[0])===k);
+      if(rowIndex>0&&(!String(values[rowIndex][1]||'').trim()||String(values[rowIndex][1])==='#ERROR!'))s.getRange(rowIndex+1,2).setValue(safeValue);
+    }
+  });
 }
 
 function seedSystem(){
   const s=sheet(SHEETS.system,HEADERS.system),values=s.getDataRange().getValues(),map={};
   values.slice(1).forEach(r=>map[String(r[0])]=r[1]);
-  if(!map.databaseVersion)s.appendRow(['databaseVersion',DATABASE_VERSION,'GUN SHOP DMO V20.2 Phase 1 Core Commerce']);
-  else setSystemValue('databaseVersion',DATABASE_VERSION,'GUN SHOP DMO V20.2 Phase 1 Core Commerce');
+  if(!map.databaseVersion)s.appendRow(['databaseVersion',DATABASE_VERSION,'GUN SHOP DMO V20.2 Stable + Facebook Bump Dry Run']);
+  else setSystemValue('databaseVersion',DATABASE_VERSION,'GUN SHOP DMO V20.2 Stable + Facebook Bump Dry Run');
   if(!map.appFamily)s.appendRow(['appFamily','GUN SHOP DMO','ชื่อชุดระบบ']); else setSystemValue('appFamily','GUN SHOP DMO','ชื่อชุดระบบ');
   if(!map.installedAt)s.appendRow(['installedAt',new Date(),'วันที่ติดตั้งครั้งแรก']);
   setSystemValue('lastMigrationAt',new Date(),'วันที่ปรับโครงสร้างล่าสุด');
@@ -298,7 +325,7 @@ function readAdmin(actor){
   const seals=rows(SHEETS.seals).filter(x=>x.id&&x.name).map(normalizeSeal),allItems=rows(SHEETS.items).filter(x=>x.id&&x.name).map(normalizeItem),gameItems=allItems.filter(x=>x.kind==='ITEM'),moneyT=allItems.find(x=>x.kind==='TMONEY')||null,services=rows(SHEETS.services).filter(x=>x.id&&x.name).map(normalizeService),settingRows=rows(SHEETS.settings),settings={};settingRows.forEach(x=>{if(String(x.key)!=='apiKey'||(actor&&['OWNER','ADMIN'].includes(actor.role)))settings[x.key]=smart(x.value);});
   const orders=rows(SHEETS.orders),reversedOrders=orders.slice().reverse(),customers=rows(SHEETS.customers),users=actor&&actor.role==='OWNER'?rows(SHEETS.users):[],systemRows=rows(SHEETS.system),setting=(key,fallback)=>Object.prototype.hasOwnProperty.call(settings,key)?settings[key]:fallback;
   const actorUser=actor?rows(SHEETS.users).find(x=>String(x.userId)===String(actor.userId)):null,environment=environmentInfo();
-  return{seals,gameItems,services,moneyT,settings,orders:reversedOrders.filter(x=>!x.deletedAt).slice(0,500),deletedOrders:actor&&['OWNER','ADMIN'].includes(actor.role)?reversedOrders.filter(x=>!!x.deletedAt).slice(0,500):[],orderItems:rowsTail(SHEETS.orderItems,5000).reverse(),logs:rowsTail(SHEETS.logs,300).reverse(),stockLogs:rowsTail(SHEETS.stockLogs,500).reverse(),stockUpdatedAt:stockUpdatedAt(),customers:customers.slice().reverse().slice(0,1500),customerInteractions:rowsTail(SHEETS.customerInteractions,3000).reverse(),promotions:rows(SHEETS.promotions).map(normalizePromotion),trash:rowsTail(SHEETS.trash,1000).reverse(),databaseVersion:(systemRows.find(x=>String(x.key)==='databaseVersion')||{}).value||DATABASE_VERSION,security:{actor,account:actorUser?{userId:actorUser.userId,displayName:actorUser.displayName,role:actorUser.role,status:actorUser.status}:null,environment:environment.environment,users:listUsers(users),sessionDays:setting('sessionDays',7),autoLockMinutes:setting('autoLockMinutes',30),apiKeyConfigured:!!String(setting('apiKey',''))},automation:getAutomationData(actor,{seals,gameItems:gameItems.concat(moneyT?[moneyT]:[]),orders:orders.filter(x=>!x.deletedAt),customers,settings})};
+  return{seals,gameItems,services,moneyT,settings,orders:reversedOrders.filter(x=>!x.deletedAt).slice(0,500),deletedOrders:actor&&['OWNER','ADMIN'].includes(actor.role)?reversedOrders.filter(x=>!!x.deletedAt).slice(0,500):[],orderItems:rowsTail(SHEETS.orderItems,5000).reverse(),logs:rowsTail(SHEETS.logs,300).reverse(),stockLogs:rowsTail(SHEETS.stockLogs,500).reverse(),stockUpdatedAt:stockUpdatedAt(),customers:customers.slice().reverse().slice(0,1500),customerInteractions:rowsTail(SHEETS.customerInteractions,3000).reverse(),promotions:rows(SHEETS.promotions).map(normalizePromotion),trash:rowsTail(SHEETS.trash,1000).reverse(),databaseVersion:(systemRows.find(x=>String(x.key)==='databaseVersion')||{}).value||DATABASE_VERSION,security:{actor,account:actorUser?{userId:actorUser.userId,displayName:actorUser.displayName,role:actorUser.role,status:actorUser.status}:null,environment:environment.environment,users:listUsers(users),sessionDays:setting('sessionDays',7),autoLockMinutes:setting('autoLockMinutes',30),apiKeyConfigured:!!String(setting('apiKey',''))},automation:getAutomationData(actor,{seals,gameItems:gameItems.concat(moneyT?[moneyT]:[]),orders:orders.filter(x=>!x.deletedAt),customers,settings}),facebookBump:getFacebookBumpData(actor)};
 }
 function normalizeSeal(x){return{...x,kind:'SEAL',price:number(x.price),packSize:number(x.packSize)||1,stock:x.stock===''?'':number(x.stock),reservedStock:number(x.reservedStock),lowStockAlert:number(x.lowStockAlert),costPrice:x.costPrice===''?'':number(x.costPrice),sortOrder:number(x.sortOrder),aliases:splitAliases(x.aliases)};}
 function normalizeItem(x){const money=String(x.id)===MONEY_T_PRODUCT_ID||String(x.itemCategory||'').toUpperCase()===MONEY_T_CATEGORY;return{...x,kind:money?'TMONEY':'ITEM',price:number(x.price),unit:money?'T':x.unit,stock:x.stock===''?'':number(x.stock),reservedStock:number(x.reservedStock),lowStockAlert:number(x.lowStockAlert),costPrice:x.costPrice===''?'':number(x.costPrice),sortOrder:number(x.sortOrder),aliases:splitAliases(x.aliases)};}

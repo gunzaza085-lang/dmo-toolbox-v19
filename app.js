@@ -76,6 +76,7 @@ const state = {
   integrityReport: null,
   catalogVisible: 60,
   imageManager: { zipData: '', fileName: '', preview: null, applying: false, allowOverwrite: false },
+  facebookBump: { tab: 'POSTS', edit: null, pending: '', connection: { connection: 'UNKNOWN', paired: false, running: false, lastError: '' } },
   publicLoadedAt: 0,
 };
 
@@ -543,7 +544,7 @@ function orderSuccessPanel(){
 function adminPage() {
   if (!state.adminToken) return `<section class="panel login-box"><h2 class="panel-title">เข้าสู่ระบบร้าน</h2><p class="product-meta">ข้อมูลหลังบ้านทั้งหมดอยู่ภายในหน้านี้</p><div class="stack"><input id="adminId" placeholder="ไอดี" ${state.loginSubmitting?'disabled':''}><input id="adminPassword" type="password" placeholder="รหัสผ่าน" ${state.loginSubmitting?'disabled':''}><button class="btn primary" id="loginBtn" ${state.loginSubmitting?'disabled':''}>${state.loginSubmitting?'<span class="loading"></span> กำลังตรวจสอบบัญชี...':'เข้าสู่ระบบ'}</button>${state.loginSubmitting?'<div class="product-meta">รับคำขอแล้ว กรุณารอสักครู่ ไม่ต้องกดซ้ำ</div>':''}<button class="btn" id="backShopBtn" ${state.loginSubmitting?'disabled':''}>← กลับหน้าร้าน</button></div></section>`;
   if (!state.adminData) return `<section class="panel empty"><span class="loading"></span> เข้าสู่ระบบสำเร็จ กำลังโหลดข้อมูลหลังร้าน...</section>`;
-  const views = [['dashboard', '📊 ภาพรวม'], ['catalog', '📦 สินค้า'], ['images', '🖼️ จัดการรูป'], ['inventory', '🏬 สต๊อก'], ['analytics', '📈 วิเคราะห์'], ['reports', '📤 รายงาน'], ['orders', '🧾 ออเดอร์'], ['marketing', '📣 สร้างโพสต์'], ['customers', '👥 CRM ลูกค้า'], ['promotions', '🎁 โปรโมชั่น'], ['wiki', '📚 DMO Wiki'], ['trash', '🗑️ ถังขยะ'], ['calculator', '🧮 คำนวณ'], ['settings', '⚙️ ตั้งค่า'], ['security', '🛡️ ความปลอดภัย'], ['integrity', '🧪 ตรวจข้อมูล'], ['automation', '🤖 Automation'], ['logs', '🕘 ประวัติ']];
+  const views = [['dashboard', '📊 ภาพรวม'], ['catalog', '📦 สินค้า'], ['images', '🖼️ จัดการรูป'], ['inventory', '🏬 สต๊อก'], ['analytics', '📈 วิเคราะห์'], ['reports', '📤 รายงาน'], ['orders', '🧾 ออเดอร์'], ['marketing', '📣 สร้างโพสต์'], ['facebookBump', '📣 ดันโพสต์ Facebook'], ['customers', '👥 CRM ลูกค้า'], ['promotions', '🎁 โปรโมชั่น'], ['wiki', '📚 DMO Wiki'], ['trash', '🗑️ ถังขยะ'], ['calculator', '🧮 คำนวณ'], ['settings', '⚙️ ตั้งค่า'], ['security', '🛡️ ความปลอดภัย'], ['integrity', '🧪 ตรวจข้อมูล'], ['automation', '🤖 Automation'], ['logs', '🕘 ประวัติ']];
   return `<div class="admin-toolbar"><div class="chip-row">${views.map(([value, label]) => `<button class="filter-chip ${state.adminView === value ? 'active' : ''}" data-admin-view="${value}">${label}</button>`).join('')}</div><div><span class="badge green">${html((state.adminUser&&state.adminUser.role)||'ADMIN')}</span> <button class="btn" id="backShopBtn">หน้าร้าน</button> <button class="btn danger" id="logoutBtn">ออกจากระบบ</button></div></div>${adminContent()}${state.editRecord !== null ? editModal() : ''}${state.wikiGallery ? wikiGalleryModal() : ''}`;
 }
 
@@ -556,6 +557,7 @@ function adminContent() {
   if (state.adminView === 'reports') return reportsPage();
   if (state.adminView === 'orders') return adminOrders();
   if (state.adminView === 'marketing') return facebookPostGenerator();
+  if (state.adminView === 'facebookBump') return facebookBumpPage();
   if (state.adminView === 'customers') return adminCustomers();
   if (state.adminView === 'promotions') return adminPromotions();
   if (state.adminView === 'settings') return adminSettings();
@@ -566,6 +568,59 @@ function adminContent() {
   if (state.adminView === 'trash') return adminTrash();
   if (state.adminView === 'logs') return adminLogs();
   return dashboardPage();
+}
+
+function facebookBumpDate(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? html(value) : date.toLocaleString('th-TH');
+}
+
+const FACEBOOK_WORKER_URL='http://127.0.0.1:17821';
+async function facebookWorkerRequest(path,payload){const response=await fetch(FACEBOOK_WORKER_URL+path,{method:payload?'POST':'GET',headers:{'Content-Type':'application/json'},body:payload?JSON.stringify(payload):undefined});const data=await response.json();if(!data.ok)throw Error(data.error||'LOCAL_WORKER_ERROR');state.facebookBump.connection=data;return data;}
+async function refreshFacebookWorker(){try{return await facebookWorkerRequest('/status');}catch(error){state.facebookBump.connection={connection:'OFFLINE',paired:false,running:false,lastError:'กรุณาเปิด Local Facebook Worker'};return state.facebookBump.connection;}}
+function facebookConnectionPanel(){const connection=state.facebookBump.connection||{},status=connection.connection||'UNKNOWN',connected=status==='CONNECTED';return `<div class="fb-connection"><div><h3>Facebook Connection</h3><div class="chip-row"><span class="badge ${connected?'green':status==='CHECKPOINT'?'red':'amber'}">${html(status)}</span><span class="badge">${connection.paired?'เชื่อมกับ BackOffice แล้ว':'ยังไม่ Pair'}</span>${connection.running?'<span class="badge amber">กำลังทำงาน</span>':''}</div>${connection.lastError?`<div class="error-text">${html(connection.lastError)}</div>`:''}<p class="product-meta">Session อยู่ใน Chrome profile บนเครื่องนี้เท่านั้น ระบบไม่อ่านหรือส่ง cookie/password ไป Google Sheets</p></div><div class="chip-row"><button class="btn primary" id="fbConnectWorkerBtn">เชื่อมต่อ Facebook</button><button class="btn" id="fbTestWorkerBtn">ทดสอบการเชื่อมต่อ</button><button class="btn" id="fbOpenFacebookBtn">เปิด Facebook</button><button class="btn danger" id="fbDisconnectWorkerBtn">ตัดการเชื่อมต่อ</button></div></div>`;}
+
+function facebookBumpPage() {
+  const data = state.adminData?.facebookBump;
+  if (!data) return `<section class="panel empty"><h2>ไม่มีสิทธิ์ใช้งานโมดูลนี้</h2><p>เฉพาะ OWNER และ ADMIN เท่านั้น</p></section>`;
+  const manager = state.facebookBump;
+  const posts = data.posts || [], queue = data.queue || [], history = data.history || [], settings = data.settings || {};
+  const activeQueue = queue.filter((job) => ['PENDING', 'PROCESSING'].includes(String(job.status))).length;
+  const tabs = [['POSTS','รายการโพสต์'],['QUEUE','คิว'],['HISTORY','ประวัติ'],['SETTINGS','ตั้งค่า']];
+  return `<section class="panel facebook-bump-module">
+    ${facebookConnectionPanel()}
+    <div class="admin-toolbar"><div><h2 class="panel-title">📣 ดันโพสต์ Facebook</h2><p class="product-meta">จัดคิวหลายโพสต์ทีละงาน แยกจากระบบร้าน</p></div><div class="chip-row"><span class="badge ${data.mode==='REAL'?'red':'amber'}">${data.mode==='REAL'?'REAL FACEBOOK':'DRY RUN'}</span><span class="badge">${data.triggerActive?'Scheduler พร้อม':'ยังไม่ติดตั้ง Scheduler'}</span></div></div>
+    <div class="security-note"><b>ค่าเริ่มต้นปลอดภัยเป็น DRY RUN</b> • REAL FACEBOOK ใช้ Local Worker และ Chrome profile บนเครื่องเท่านั้น เมื่อ Facebook ขอ Login/2FA/CAPTCHA/checkpoint ระบบจะหยุดให้ผู้ใช้ดำเนินการเอง</div>
+    <div class="metrics fb-metrics"><div class="metric">โพสต์ทั้งหมด<b>${posts.length}</b></div><div class="metric ready">เปิดใช้งาน<b>${posts.filter((post)=>String(post.enabled).toUpperCase()==='TRUE').length}</b></div><div class="metric warning">งานในคิว<b>${activeQueue}</b></div><div class="metric ${settings.paused?'danger':'sales'}">สถานะรวม<b>${settings.paused?'พักทั้งหมด':'ทำงาน'}</b></div></div>
+    <div class="admin-toolbar"><div class="chip-row">${tabs.map(([value,label])=>`<button class="filter-chip ${manager.tab===value?'active':''}" data-fb-tab="${value}">${label}</button>`).join('')}</div><div class="chip-row"><button class="btn warning" id="fbPauseAllBtn" ${settings.paused?'disabled':''}>พักทั้งหมด</button><button class="btn success" id="fbResumeAllBtn" ${settings.paused?'':'disabled'}>ทำงานต่อทั้งหมด</button><button class="btn" id="fbEnsureTriggerBtn">เปิด Scheduler</button></div></div>
+    ${manager.tab==='QUEUE'?facebookBumpQueueView(queue):manager.tab==='HISTORY'?facebookBumpHistoryView(history):manager.tab==='SETTINGS'?facebookBumpSettingsView(settings):facebookBumpPostsView(posts,settings)}
+  </section>`;
+}
+
+function facebookBumpPostsView(posts, settings) {
+  const manager=state.facebookBump,edit=manager.edit||{name:'',postUrl:'',bumpMessage:settings.defaultMessage||'+',intervalMinutes:settings.defaultInterval||60,enabled:false};
+  return `<div class="fb-layout"><form class="fb-editor" id="fbPostForm"><h3>${edit.id?'แก้ไขโพสต์':'เพิ่ม Facebook Post URL'}</h3>
+    <label>ชื่อโพสต์<input id="fbPostName" maxlength="120" value="${html(edit.name||'')}" placeholder="เช่น โพสต์ขายซีลหลัก"></label>
+    <label>Facebook Post URL<input id="fbPostUrl" type="url" value="${html(edit.postUrl||'')}" placeholder="https://www.facebook.com/..."></label>
+    <div class="form-grid"><label>ข้อความดัน<input id="fbPostMessage" maxlength="500" value="${html(edit.bumpMessage||'+')}"></label><label>รอบ (นาที)<input id="fbPostInterval" type="number" min="5" max="10080" step="1" value="${html(edit.intervalMinutes||60)}"></label></div>
+    <label class="toggle-row"><input id="fbPostEnabled" type="checkbox" ${String(edit.enabled).toUpperCase()==='TRUE'||edit.enabled===true?'checked':''}> เปิดใช้งานหลังบันทึก</label>
+    <div class="chip-row"><button class="btn primary" id="fbSavePostBtn" type="submit" ${manager.pending?'disabled':''}>${manager.pending==='SAVE_POST'?'กำลังบันทึก...':'บันทึกโพสต์'}</button>${edit.id?'<button class="btn" id="fbCancelEditBtn" type="button">ยกเลิกแก้ไข</button>':''}</div>
+    <p class="product-meta">ขั้นตอน: URL → Save → Enable • ค่าเริ่มต้นข้อความ + และรอบ 60 นาที</p></form>
+    <div class="fb-post-list"><h3>รายการโพสต์</h3>${posts.length?posts.map((post)=>`<article class="fb-post-card"><div><div class="chip-row"><b>${html(post.name)}</b><span class="badge ${String(post.enabled).toUpperCase()==='TRUE'?'green':'amber'}">${String(post.enabled).toUpperCase()==='TRUE'?'ENABLED':'PAUSED'}</span><span class="badge">${html(post.lastStatus||'READY')}</span></div><a href="${html(post.postUrl)}" target="_blank" rel="noopener">${html(post.postUrl)}</a><div class="product-meta">ข้อความ: ${html(post.bumpMessage||'+')} • ทุก ${money(post.intervalMinutes||60)} นาที</div><div class="product-meta">ล่าสุด ${facebookBumpDate(post.lastRunAt)} • รอบถัดไป ${facebookBumpDate(post.nextRunAt)}</div></div><div class="chip-row"><button class="btn primary small" data-fb-now="${html(post.id)}">ดันตอนนี้</button><button class="btn small" data-fb-toggle="${html(post.id)}|${String(post.enabled).toUpperCase()==='TRUE'?'FALSE':'TRUE'}">${String(post.enabled).toUpperCase()==='TRUE'?'Pause':'Resume'}</button><button class="btn small" data-fb-edit="${html(post.id)}">Edit</button><button class="btn danger small" data-fb-delete="${html(post.id)}">Delete</button></div></article>`).join(''):'<div class="empty">ยังไม่มีโพสต์ เริ่มจากวาง URL ด้านซ้าย</div>'}</div></div>`;
+}
+
+function facebookBumpQueueView(queue) {
+  return `<div class="fb-table"><div class="fb-table-head"><b>Post</b><b>กำหนดเวลา</b><b>Status</b><b>Attempts</b><b>จัดการ</b></div>${queue.length?queue.map((job)=>`<div class="fb-table-row"><div><b>${html(job.postName||job.targetPostId)}</b><small>${html(job.message||'')}</small></div><span>${facebookBumpDate(job.scheduledAt)}</span><span class="badge ${job.status==='COMPLETED'?'green':job.status==='FAILED'?'red':'amber'}">${html(job.status)}</span><span>${money(job.attempts||0)}${job.error?`<small>${html(job.error)}</small>`:''}</span><div>${job.status==='PENDING'?`<button class="btn danger small" data-fb-cancel-job="${html(job.jobId)}">Cancel</button>`:job.status==='FAILED'?`<button class="btn warning small" data-fb-retry-job="${html(job.jobId)}">Retry</button>`:'-'}</div></div>`).join(''):'<div class="empty">คิวยังว่าง</div>'}</div>`;
+}
+
+function facebookBumpHistoryView(history) {
+  return `<div class="fb-history">${history.length?history.map((item)=>`<article class="fb-history-row"><div><b>${html(item.postName||item.targetPostId)}</b><div class="product-meta">${facebookBumpDate(item.createdAt)} • ${html(item.action||'BUMP')}</div></div><div><span class="badge ${item.result==='COMPLETED'?'green':'red'}">${html(item.result||'-')}</span><div class="product-meta">Comment: ${html(item.commentId||'-')}</div><div class="product-meta">Cleanup: ${html(item.cleanupResult||'-')}</div>${item.error?`<div class="error-text">${html(item.error)}</div>`:''}</div></article>`).join(''):'<div class="empty">ยังไม่มีประวัติ Dry Run</div>'}</div>`;
+}
+
+function facebookBumpSettingsView(settings) {
+  const real=settings.mode==='REAL';
+  return `<div class="fb-settings"><h3>ตั้งค่า Facebook Bump</h3><div class="form-grid"><label>Mode<select id="fbMode"><option value="DRY_RUN" ${real?'':'selected'}>DRY RUN</option><option value="REAL" ${real?'selected':''}>REAL FACEBOOK</option></select></label><label>Default Bump Interval (นาที)<input id="fbDefaultInterval" type="number" min="5" max="10080" value="${html(settings.defaultInterval||60)}"></label><label>Default Bump Message<input id="fbDefaultMessage" maxlength="500" value="${html(settings.defaultMessage||'+')}"></label><label>Delay Between Jobs (วินาที)<input id="fbDelaySeconds" type="number" min="0" max="3600" value="${html(settings.delaySeconds||0)}"></label><label class="toggle-row"><input id="fbCleanupOld" type="checkbox" ${settings.cleanupOld?'checked':''}> จัดการ Comment ดันเก่าของระบบ หลัง Comment ใหม่สำเร็จ</label></div><div class="security-note">ค่าเริ่มต้นคือ <b>DRY RUN</b> • REAL FACEBOOK เปิดได้โดย OWNER หลัง Local Worker เชื่อมต่อแล้วเท่านั้น • ถ้ายืนยัน ownership ของ Comment เก่าไม่ได้ ระบบจะไม่ลบ</div><button class="btn success" id="fbSaveSettingsBtn" ${state.facebookBump.pending?'disabled':''}>${state.facebookBump.pending==='SAVE_SETTINGS'?'กำลังบันทึก...':'บันทึกการตั้งค่า'}</button></div>`;
 }
 
 function dashboardPage() {
@@ -1103,7 +1158,7 @@ function wikiGalleryModal() {
 }
 
 function adminBootstrapData() {
-  return {seals:state.seals||[],gameItems:state.items||[],services:state.services||[],moneyT:state.moneyT||null,settings:state.settings||{},orders:[],deletedOrders:[],orderItems:[],logs:[],stockLogs:[],stockUpdatedAt:'',customers:[],customerInteractions:[],promotions:state.promotions||[],trash:[],security:{actor:state.adminUser||{}},automation:{},databaseVersion:''};
+  return {seals:state.seals||[],gameItems:state.items||[],services:state.services||[],moneyT:state.moneyT||null,settings:state.settings||{},orders:[],deletedOrders:[],orderItems:[],logs:[],stockLogs:[],stockUpdatedAt:'',customers:[],customerInteractions:[],promotions:state.promotions||[],trash:[],security:{actor:state.adminUser||{}},automation:{},facebookBump:null,databaseVersion:''};
 }
 
 async function loadAdmin(force = true) {
@@ -1113,7 +1168,7 @@ async function loadAdmin(force = true) {
   if (!state.adminData) { state.adminData = adminBootstrapData(); render(); }
   adminLoadPromise=(async()=>{try {
     const data = await apiPost({action:'getAdminData',token:state.adminToken});
-    state.adminData = { seals: data.seals || [], gameItems: data.gameItems || [], services: data.services || [], moneyT:data.moneyT||null, settings: data.settings || {}, orders: data.orders || [], deletedOrders:data.deletedOrders||[], orderItems:data.orderItems||[], logs: data.logs || [], stockLogs: data.stockLogs || [], stockUpdatedAt:data.stockUpdatedAt||'', customers: data.customers || [], customerInteractions:data.customerInteractions||[], promotions: data.promotions || [], trash: data.trash || [], security: data.security || {}, automation: data.automation || {}, databaseVersion:data.databaseVersion||'' };
+    state.adminData = { seals: data.seals || [], gameItems: data.gameItems || [], services: data.services || [], moneyT:data.moneyT||null, settings: data.settings || {}, orders: data.orders || [], deletedOrders:data.deletedOrders||[], orderItems:data.orderItems||[], logs: data.logs || [], stockLogs: data.stockLogs || [], stockUpdatedAt:data.stockUpdatedAt||'', customers: data.customers || [], customerInteractions:data.customerInteractions||[], promotions: data.promotions || [], trash: data.trash || [], security: data.security || {}, automation: data.automation || {}, facebookBump:data.facebookBump||null, databaseVersion:data.databaseVersion||'' };
     state.adminLoadedAt = Date.now();
     if(data.security&&data.security.actor){state.adminUser={...(state.adminUser||{}),...data.security.actor};sessionStorage.setItem('dmo_admin_user',JSON.stringify(state.adminUser));}
     render();
@@ -1128,6 +1183,22 @@ async function loadAdmin(force = true) {
     state.adminLoading = false;adminLoadPromise=null;
   }})();
   return adminLoadPromise;
+}
+
+async function loadFacebookBumpAdminData() {
+  if (state.facebookBump.pending === 'LOAD_MODULE') return;
+  state.facebookBump.pending = 'LOAD_MODULE';
+  render();
+  try {
+    const data = await apiPost({action:'getFacebookBumpAdminData',token:state.adminToken});
+    state.adminData.facebookBump = data.facebookBump || null;
+    await refreshFacebookWorker();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    state.facebookBump.pending = '';
+    render();
+  }
 }
 
 async function saveRecordAction() {
@@ -1370,6 +1441,43 @@ function addToCartSilent(product, quantity) {
   return true;
 }
 
+async function facebookBumpRequest(pendingKey, payload, successMessage) {
+  if (state.facebookBump.pending) return;
+  try {
+    state.facebookBump.pending = pendingKey;
+    render();
+    const result = await apiPost({ ...payload, token: state.adminToken });
+    if (successMessage) toast(result.message || successMessage);
+    const refreshed = await apiPost({action:'getFacebookBumpAdminData',token:state.adminToken});
+    state.adminData.facebookBump = refreshed.facebookBump || null;
+    await refreshFacebookWorker();
+    render();
+    return result;
+  } catch (error) {
+    toast(error.message);
+    return null;
+  } finally {
+    state.facebookBump.pending = '';
+    render();
+  }
+}
+
+async function saveFacebookBumpPostFromForm(event) {
+  event?.preventDefault();
+  const current=state.facebookBump.edit||{};
+  const post={id:current.id||'',name:document.getElementById('fbPostName')?.value||'',postUrl:document.getElementById('fbPostUrl')?.value||'',bumpMessage:document.getElementById('fbPostMessage')?.value||'+',intervalMinutes:Number(document.getElementById('fbPostInterval')?.value||60),enabled:!!document.getElementById('fbPostEnabled')?.checked};
+  const result=await facebookBumpRequest('SAVE_POST',{action:'saveFacebookBumpPost',post},'บันทึกโพสต์แล้ว');
+  if(result)state.facebookBump.edit=null;
+}
+
+async function saveFacebookBumpSettingsFromForm() {
+  const mode=document.getElementById('fbMode')?.value||'DRY_RUN',connection=state.facebookBump.connection||{};
+  if(mode==='REAL'&&(connection.connection!=='CONNECTED'||!connection.paired))throw Error('กรุณาเปิด Local Worker และเชื่อมต่อ Facebook ให้สำเร็จก่อน');
+  const realConfirmed=mode==='REAL'&&confirm('ยืนยันเปิด REAL FACEBOOK? ระบบจะส่ง Comment จริงตาม Queue ทีละโพสต์')?'ENABLE_REAL_FACEBOOK':'';if(mode==='REAL'&&!realConfirmed)return;
+  const settings={mode,realConfirmed,defaultInterval:Number(document.getElementById('fbDefaultInterval')?.value||60),defaultMessage:document.getElementById('fbDefaultMessage')?.value||'+',delaySeconds:Number(document.getElementById('fbDelaySeconds')?.value||0),cleanupOld:!!document.getElementById('fbCleanupOld')?.checked};
+  await facebookBumpRequest('SAVE_SETTINGS',{action:'saveFacebookBumpSettings',settings},'บันทึกการตั้งค่าแล้ว');
+}
+
 function bind() {
   document.querySelectorAll('[data-type]').forEach((button) => button.onclick = () => { state.catalogType = button.dataset.type; state.wishlistOnly=false; state.search = ''; state.selectedSearchKey = '';state.catalogVisible=60; render(); });
   const favoritesBtn=document.getElementById('favoritesBtn');if(favoritesBtn)favoritesBtn.onclick=()=>{state.wishlistOnly=!state.wishlistOnly;state.catalogVisible=60;render();};
@@ -1399,7 +1507,28 @@ function bind() {
   const backShop = document.getElementById('backShopBtn'); if (backShop) backShop.onclick = () => { state.page = 'shop'; location.hash = ''; render(); };
   const login = document.getElementById('loginBtn'); if (login) login.onclick = async () => { if(state.loginSubmitting)return;const adminId=document.getElementById('adminId').value,password=document.getElementById('adminPassword').value;state.loginSubmitting=true;render();try { const data = await apiPost({ action: 'login', adminId, password }); state.loginSubmitting=false;state.adminToken = data.token; state.adminUser=data.user||null;state.adminData=adminBootstrapData();state.adminLoadedAt=0; state.lastAdminActivity=Date.now(); sessionStorage.setItem('dmo_admin_token', data.token); sessionStorage.setItem('dmo_admin_user',JSON.stringify(state.adminUser)); sessionStorage.setItem('dmo_admin_activity',String(state.lastAdminActivity));render();await loadAdmin(true); } catch (error) { state.loginSubmitting=false;render();toast(error.message); } };
   const logout = document.getElementById('logoutBtn'); if (logout) logout.onclick = async () => { try{await apiPost({action:'logout',token:state.adminToken});}catch(e){} state.adminToken = ''; state.adminData = null; state.adminUser=null; sessionStorage.removeItem('dmo_admin_token');sessionStorage.removeItem('dmo_admin_user');sessionStorage.removeItem('dmo_admin_activity'); render(); };
-  document.querySelectorAll('[data-admin-view]').forEach((button) => button.onclick = () => { state.adminView = button.dataset.adminView; render(); });
+  document.querySelectorAll('[data-admin-view]').forEach((button) => button.onclick = async () => {
+    state.adminView = button.dataset.adminView;
+    render();
+    if (state.adminView === 'facebookBump' && !state.adminData?.facebookBump) await loadFacebookBumpAdminData();
+  });
+  document.querySelectorAll('[data-fb-tab]').forEach((button)=>button.onclick=()=>{state.facebookBump.tab=button.dataset.fbTab;state.facebookBump.edit=null;render();});
+  const fbPostForm=document.getElementById('fbPostForm');if(fbPostForm)fbPostForm.onsubmit=saveFacebookBumpPostFromForm;
+  const fbCancelEditBtn=document.getElementById('fbCancelEditBtn');if(fbCancelEditBtn)fbCancelEditBtn.onclick=()=>{state.facebookBump.edit=null;render();};
+  document.querySelectorAll('[data-fb-edit]').forEach((button)=>button.onclick=()=>{const post=(state.adminData.facebookBump?.posts||[]).find((item)=>String(item.id)===String(button.dataset.fbEdit));state.facebookBump.edit=post?{...post}:null;render();});
+  document.querySelectorAll('[data-fb-toggle]').forEach((button)=>button.onclick=async()=>{const [id,enabled]=button.dataset.fbToggle.split('|');await facebookBumpRequest('TOGGLE_'+id,{action:'toggleFacebookBumpPost',id,enabled:enabled==='TRUE'},enabled==='TRUE'?'เปิดใช้งานโพสต์แล้ว':'พักโพสต์แล้ว');});
+  document.querySelectorAll('[data-fb-now]').forEach((button)=>button.onclick=async()=>{await facebookBumpRequest('NOW_'+button.dataset.fbNow,{action:'queueFacebookBumpNow',id:button.dataset.fbNow},'เพิ่มงานเข้าคิวแล้ว ระบบจะทำทีละโพสต์');});
+  document.querySelectorAll('[data-fb-delete]').forEach((button)=>button.onclick=async()=>{if(!confirm('ย้ายโพสต์นี้ออกจากรายการ? ประวัติเดิมจะยังอยู่'))return;await facebookBumpRequest('DELETE_'+button.dataset.fbDelete,{action:'deleteFacebookBumpPost',id:button.dataset.fbDelete},'นำโพสต์ออกแล้ว');});
+  document.querySelectorAll('[data-fb-cancel-job]').forEach((button)=>button.onclick=async()=>{await facebookBumpRequest('CANCEL_'+button.dataset.fbCancelJob,{action:'cancelFacebookBumpJob',jobId:button.dataset.fbCancelJob},'ยกเลิกงานแล้ว');});
+  document.querySelectorAll('[data-fb-retry-job]').forEach((button)=>button.onclick=async()=>{await facebookBumpRequest('RETRY_'+button.dataset.fbRetryJob,{action:'retryFacebookBumpJob',jobId:button.dataset.fbRetryJob},'ส่งงานกลับเข้าคิวแล้ว');});
+  const fbPauseAllBtn=document.getElementById('fbPauseAllBtn');if(fbPauseAllBtn)fbPauseAllBtn.onclick=()=>facebookBumpRequest('PAUSE_ALL',{action:'pauseAllFacebookBumps'},'พักทุกโพสต์แล้ว');
+  const fbResumeAllBtn=document.getElementById('fbResumeAllBtn');if(fbResumeAllBtn)fbResumeAllBtn.onclick=()=>facebookBumpRequest('RESUME_ALL',{action:'resumeAllFacebookBumps'},'ระบบจะดำเนินคิวต่อทีละงาน');
+  const fbEnsureTriggerBtn=document.getElementById('fbEnsureTriggerBtn');if(fbEnsureTriggerBtn)fbEnsureTriggerBtn.onclick=()=>facebookBumpRequest('TRIGGER',{action:'ensureFacebookBumpTrigger'},'เปิด Scheduler แล้ว');
+  const fbConnectWorkerBtn=document.getElementById('fbConnectWorkerBtn');if(fbConnectWorkerBtn)fbConnectWorkerBtn.onclick=async()=>{try{await facebookWorkerRequest('/connect',{});if(state.facebookBump.connection.connection==='CONNECTED')await facebookWorkerRequest('/pair',{apiUrl:cfg.sheetsUrl,token:state.adminToken});render();}catch(error){toast(error.message);await refreshFacebookWorker();render();}};
+  const fbTestWorkerBtn=document.getElementById('fbTestWorkerBtn');if(fbTestWorkerBtn)fbTestWorkerBtn.onclick=async()=>{try{await facebookWorkerRequest('/test',{});if(state.facebookBump.connection.connection==='CONNECTED'&&!state.facebookBump.connection.paired)await facebookWorkerRequest('/pair',{apiUrl:cfg.sheetsUrl,token:state.adminToken});toast(state.facebookBump.connection.connection==='CONNECTED'?'Facebook พร้อมใช้งาน':'กรุณา Login Facebook ในหน้าต่าง Chrome');render();}catch(error){toast(error.message);await refreshFacebookWorker();render();}};
+  const fbOpenFacebookBtn=document.getElementById('fbOpenFacebookBtn');if(fbOpenFacebookBtn)fbOpenFacebookBtn.onclick=async()=>{try{await facebookWorkerRequest('/open',{url:'https://www.facebook.com/'});render();}catch(error){toast(error.message);}};
+  const fbDisconnectWorkerBtn=document.getElementById('fbDisconnectWorkerBtn');if(fbDisconnectWorkerBtn)fbDisconnectWorkerBtn.onclick=async()=>{try{await facebookWorkerRequest('/disconnect',{});render();}catch(error){toast(error.message);}};
+  const fbSaveSettingsBtn=document.getElementById('fbSaveSettingsBtn');if(fbSaveSettingsBtn)fbSaveSettingsBtn.onclick=saveFacebookBumpSettingsFromForm;
   const runIntegrityBtn=document.getElementById('runIntegrityBtn');if(runIntegrityBtn)runIntegrityBtn.onclick=async()=>{try{runIntegrityBtn.disabled=true;runIntegrityBtn.textContent='กำลังตรวจ...';const data=await apiPost({action:'runIntegrityCheck',token:state.adminToken});state.integrityReport=data.integrity||null;render();}catch(e){toast(e.message);render();}};
   document.querySelectorAll('[data-new]').forEach((button) => button.onclick = () => { const kind = button.dataset.new; state.editRecord = { kind, status: 'ACTIVE', category: 'AT', section: 'NORMAL', unit: kind === 'SEAL' ? 'ชุด' : kind === 'SERVICE' ? 'ครั้ง' : 'ชิ้น', packSize: 1000, sortOrder: 10, stock: '', reservedStock: 0, lowStockAlert: 0, costPrice: '' }; render(); });
   document.querySelectorAll('[data-edit]').forEach((button) => button.onclick = () => { const [kind, id] = button.dataset.edit.split('|'); const list = kind === 'SEAL' ? state.adminData.seals : kind === 'SERVICE' ? state.adminData.services : kind === 'TMONEY' ? [state.adminData.moneyT] : state.adminData.gameItems; state.editRecord = { ...list.find((entry) => entry&&entry.id === id) }; render(); });

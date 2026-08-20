@@ -128,3 +128,13 @@ select option{background:var(--panel);color:var(--text)}
 :root[data-theme="LIGHT"] .order-card-v20.spam-order,:root[data-theme="LIGHT"] .spam-note{background:#fff1f3;color:#6a1d27}
 @media(max-width:1050px){.pick-row{grid-template-columns:28px minmax(110px,.7fr) minmax(170px,1fr) minmax(100px,.55fr)}.pick-stock{grid-column:2/5}.pick-row>button{grid-column:5}}
 @media(max-width:720px){.pick-row{grid-template-columns:26px minmax(0,1fr)}.pick-category,.pick-name,.pick-quantity,.pick-stock,.pick-row>button{grid-column:2}.pick-row>button{width:100%}.marketing-preview{min-height:430px}.order-kpis{grid-template-columns:repeat(2,1fr)}}
+
+/* Facebook Bump module — isolated Dry Run UI */
+.facebook-bump-module{display:grid;gap:16px}.fb-metrics{grid-template-columns:repeat(4,minmax(130px,1fr))}.fb-layout{display:grid;grid-template-columns:minmax(280px,380px) minmax(0,1fr);gap:16px;align-items:start}
+.fb-connection{display:flex;justify-content:space-between;gap:16px;align-items:center;padding:16px;border:1px solid var(--line);border-radius:16px;background:var(--panel2)}.fb-connection h3{margin:0 0 8px}.fb-connection .chip-row{flex-wrap:wrap}
+.fb-editor,.fb-settings,.fb-post-list{display:grid;gap:12px;padding:16px;border:1px solid var(--line);border-radius:16px;background:var(--panel2)}.fb-editor label,.fb-settings label{display:grid;gap:6px;font-weight:700}.fb-post-list{max-height:720px;overflow:auto}
+.fb-post-card,.fb-history-row{display:flex;justify-content:space-between;gap:14px;padding:14px;border:1px solid var(--line);border-radius:14px;background:var(--panel)}.fb-post-card>div:first-child{min-width:0}.fb-post-card a{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fb-table{display:grid;border:1px solid var(--line);border-radius:14px;overflow:hidden}.fb-table-head,.fb-table-row{display:grid;grid-template-columns:minmax(180px,1.5fr) minmax(150px,1fr) 120px 110px 100px;gap:10px;align-items:center;padding:12px}.fb-table-head{background:var(--panel2)}.fb-table-row{border-top:1px solid var(--line)}
+.fb-table-row small,.fb-history-row small{display:block;color:var(--muted);margin-top:4px}.fb-history{display:grid;gap:10px}.fb-settings{max-width:760px}.error-text{color:var(--red);font-size:.88rem;margin-top:4px}
+@media(max-width:900px){.fb-layout{grid-template-columns:1fr}.fb-metrics{grid-template-columns:repeat(2,minmax(120px,1fr))}.fb-table{overflow:auto}.fb-table-head,.fb-table-row{min-width:760px}}
+@media(max-width:600px){.fb-post-card,.fb-history-row,.fb-connection{flex-direction:column;align-items:stretch}.fb-metrics{grid-template-columns:1fr 1fr}.facebook-bump-module .admin-toolbar{align-items:stretch}}

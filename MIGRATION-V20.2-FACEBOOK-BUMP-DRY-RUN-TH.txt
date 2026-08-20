@@ -1,0 +1,22 @@
+GUN SHOP DMO V20.2 Stable — Facebook Bump Dry Run Migration
+
+Database: 3.2.0 → 3.2.1
+
+เพิ่มแบบ additive เท่านั้น:
+- FacebookBumpPosts
+- FacebookBumpQueue
+- FacebookBumpHistory
+- FacebookOwnedComments
+- Settings keys ที่ขึ้นต้นด้วย facebookBump
+
+การทำงาน:
+- ensureDatabase() เพิ่มเฉพาะ Sheet/Header/Setting ที่ยังไม่มี
+- ไม่ลบ ไม่ rename และไม่เขียนทับ Stock, Orders, Customers, Products
+- Dry Run ถูกล็อกเป็น TRUE
+- Scheduler เป็น time trigger ทุก 1 นาที และต้องกด “เปิด Scheduler” โดย OWNER/ADMIN
+- แต่ละ trigger ประมวลผลสูงสุด 1 job และใช้ Delay gate ก่อน job ถัดไป
+
+ยังไม่รวม:
+- Facebook Login / Token / Graph API
+- Browser automation
+- Comment หรือ Delete Comment จริง

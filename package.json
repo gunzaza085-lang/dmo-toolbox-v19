@@ -1,0 +1,13 @@
+{
+  "name": "gun-shop-dmo-facebook-worker",
+  "private": true,
+  "version": "20.2.0",
+  "scripts": {
+    "facebook-worker": "node facebook-worker/worker.js",
+    "test-server": "node facebook-worker/dev-server.js",
+    "test:facebook-worker": "node facebook-worker/test.js"
+  },
+  "dependencies": {
+    "playwright-core": "^1.55.0"
+  }
+}
