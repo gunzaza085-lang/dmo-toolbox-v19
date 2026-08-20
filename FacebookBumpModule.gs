@@ -60,7 +60,7 @@ function facebookBumpSettings(){
     defaultMessage:String(settingValue('facebookBumpDefaultMessage','+')||'+'),
     delaySeconds:Math.max(0,number(settingValue('facebookBumpDelaySeconds',30))||0),
     cleanupOld:settingValue('facebookBumpCleanupOld',true)!==false,
-    paused:settingValue('facebookBumpPaused',false)===true,
+    paused:facebookBumpBoolean(settingValue('facebookBumpPaused',false)),
     mode,dryRun:mode!=='REAL',
     nextJobAllowedAt:settingValue('facebookBumpNextJobAllowedAt','')||''
   };
