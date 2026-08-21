@@ -8,6 +8,7 @@ const main=fs.readFileSync(path.join(root,'GoogleAppsScript.gs'),'utf8');
 const moduleSource=fs.readFileSync(path.join(root,'FacebookBumpModule.gs'),'utf8');
 const frontend=fs.readFileSync(path.join(root,'app.js'),'utf8');
 const css=fs.readFileSync(path.join(root,'app.css'),'utf8');
+const worker=fs.readFileSync(path.join(root,'facebook-worker','worker.js'),'utf8');
 const tests=[];
 function test(name,fn){try{fn();tests.push({name,status:'PASS'});}catch(error){tests.push({name,status:'FAIL',error:error.stack||error.message});}}
 function assert(value,message){if(!value)throw Error(message);}
@@ -112,6 +113,28 @@ test('Permissions, safe Dry Run default and Real mode guard are present',()=>{
   ['claimFacebookBumpJob','completeFacebookBumpJob','failFacebookBumpJob'].forEach(name=>assert(main.includes(`case'${name}'`)&&moduleSource.includes(`function ${name}`),`worker action missing ${name}`));
   ['ดันโพสต์ Facebook','data-fb-now','data-fb-cancel-job','data-fb-retry-job','Delay Between Jobs'].forEach(text=>assert(frontend.includes(text),`UI missing ${text}`));
   assert(css.includes('.facebook-bump-module'),'module CSS missing');
+});
+
+test('Facebook action UX gives immediate feedback and blocks duplicate clicks',()=>{
+  ['กำลังเชื่อมต่อ...','กำลังทดสอบ...','กำลังส่งงาน...','กำลังบันทึก...','กำลังเปิด Scheduler...','กำลังปิด Scheduler...'].forEach(text=>assert(frontend.includes(text),`loading feedback missing ${text}`));
+  assert(frontend.includes("if(state.facebookBump.pending)return null")&&frontend.includes("if (state.facebookBump.pending) return;"),'duplicate click guard missing');
+  assert(frontend.includes('facebookDisabled()')&&css.includes('button:disabled'),'disabled action styling missing');
+  assert(moduleSource.includes('โพสต์นี้มีงานรออยู่แล้ว'),'duplicate queue message is unclear');
+  ['Worker ${html(worker)}','Browser ${html(browser)}','Facebook ${html(status)}','PENDING ${queueCounts.PENDING}','PROCESSING ${queueCounts.PROCESSING}','COMPLETED ${queueCounts.COMPLETED}'].forEach(text=>assert(frontend.includes(text),`visible status missing ${text}`));
+});
+
+test('Worker uses one persistent browser and can focus an existing window',()=>{
+  assert(worker.includes("launchPersistentContext(PROFILE_DIR"),'persistent browser profile missing');
+  assert(worker.includes('if (!context) context = await chromium.launchPersistentContext'),'worker can open duplicate browser contexts');
+  assert(worker.includes('await page.bringToFront()'),'worker does not focus the existing browser');
+  assert(worker.includes("worker: 'ONLINE'")&&worker.includes("browser: browserRunning ? 'RUNNING' : 'STOPPED'"),'worker/browser status missing');
+  assert(worker.includes('BACKEND_TIMEOUT_MS')&&worker.includes('AbortController'),'stalled backend request recovery missing');
+});
+
+test('Scheduler can be opened or closed with server-side permission checks',()=>{
+  assert(main.includes("case'disableFacebookBumpTrigger'")&&main.includes("'disableFacebookBumpTrigger'"),'disable scheduler API missing');
+  assert(moduleSource.includes('function disableFacebookBumpTriggerAction')&&moduleSource.includes("requireRole(body.token,['OWNER','ADMIN'])"),'disable scheduler permission guard missing');
+  assert(frontend.includes("active?'disableFacebookBumpTrigger':'ensureFacebookBumpTrigger'"),'scheduler toggle UI missing');
 });
 
 test('Protected systems remain present',()=>{

@@ -11,11 +11,14 @@ const FACEBOOK_BUMP_ACTIVE_JOB_STATUSES=['PENDING','PROCESSING'];
 const FACEBOOK_BUMP_JOB_STATUSES=['PENDING','PROCESSING','COMPLETED','FAILED','CANCELLED'];
 
 function ensureFacebookBumpDatabase(){
+  const cache=CacheService.getScriptCache(),cacheKey='facebook-bump-ready-'+DATABASE_VERSION;
+  if(cache.get(cacheKey)==='TRUE')return;
   sheet(SHEETS.facebookBumpPosts,HEADERS.facebookBumpPosts);
   sheet(SHEETS.facebookBumpQueue,HEADERS.facebookBumpQueue);
   sheet(SHEETS.facebookBumpHistory,HEADERS.facebookBumpHistory);
   sheet(SHEETS.facebookOwnedComments,HEADERS.facebookOwnedComments);
   facebookBumpRepairLiteralErrors();
+  cache.put(cacheKey,'TRUE',300);
 }
 
 function facebookBumpRepairLiteralErrors(){
@@ -53,16 +56,18 @@ function facebookBumpPlanDuePosts(posts,queue,now){const time=facebookBumpDateVa
 function facebookBumpSelectNextPending(queue,now){const time=facebookBumpDateValue(now||new Date());return queue.filter(job=>String(job.status)==='PENDING'&&facebookBumpDateValue(job.scheduledAt)<=time).sort((a,b)=>facebookBumpDateValue(a.scheduledAt)-facebookBumpDateValue(b.scheduledAt))[0]||null;}
 function facebookBumpCleanupCandidate(comments,targetPostId,newCommentId){return comments.filter(comment=>String(comment.targetPostId)===String(targetPostId)&&String(comment.externalCommentId)!==String(newCommentId)&&String(comment.status)==='ACTIVE'&&!comment.deletedAt).sort((a,b)=>facebookBumpDateValue(b.createdAt)-facebookBumpDateValue(a.createdAt))[0]||null;}
 
-function facebookBumpSettings(){
-  const mode=String(settingValue('facebookBumpMode',settingValue('facebookBumpDryRun',true)===false?'REAL':'DRY_RUN')).toUpperCase()==='REAL'?'REAL':'DRY_RUN';
+function facebookBumpSettings(settingRows){
+  const values={};(settingRows||rows(SHEETS.settings)).forEach(item=>{values[String(item.key)]=smart(item.value);});
+  const value=(key,fallback)=>Object.prototype.hasOwnProperty.call(values,key)?values[key]:fallback;
+  const mode=String(value('facebookBumpMode',value('facebookBumpDryRun',true)===false?'REAL':'DRY_RUN')).toUpperCase()==='REAL'?'REAL':'DRY_RUN';
   return{
-    defaultInterval:Math.max(5,number(settingValue('facebookBumpDefaultInterval',60))||60),
-    defaultMessage:String(settingValue('facebookBumpDefaultMessage','+')||'+'),
-    delaySeconds:Math.max(0,number(settingValue('facebookBumpDelaySeconds',30))||0),
-    cleanupOld:settingValue('facebookBumpCleanupOld',true)!==false,
-    paused:facebookBumpBoolean(settingValue('facebookBumpPaused',false)),
+    defaultInterval:Math.max(5,number(value('facebookBumpDefaultInterval',60))||60),
+    defaultMessage:String(value('facebookBumpDefaultMessage','+')||'+'),
+    delaySeconds:Math.max(0,number(value('facebookBumpDelaySeconds',30))||0),
+    cleanupOld:value('facebookBumpCleanupOld',true)!==false,
+    paused:facebookBumpBoolean(value('facebookBumpPaused',false)),
     mode,dryRun:mode!=='REAL',
-    nextJobAllowedAt:settingValue('facebookBumpNextJobAllowedAt','')||''
+    nextJobAllowedAt:value('facebookBumpNextJobAllowedAt','')||''
   };
 }
 
@@ -82,7 +87,7 @@ function getFacebookBumpData(actor){
   const posts=facebookBumpRows(SHEETS.facebookBumpPosts).filter(post=>!post.deletedAt).sort((a,b)=>String(a.name).localeCompare(String(b.name),'th'));
   const queue=facebookBumpRows(SHEETS.facebookBumpQueue).sort((a,b)=>facebookBumpDateValue(b.createdAt)-facebookBumpDateValue(a.createdAt)).slice(0,300);
   const history=facebookBumpRows(SHEETS.facebookBumpHistory).sort((a,b)=>facebookBumpDateValue(b.createdAt)-facebookBumpDateValue(a.createdAt)).slice(0,500);
-  const settings=facebookBumpSettings();return{posts:posts.map(facebookBumpPublicRecord),queue:queue.map(facebookBumpPublicRecord),history:history.map(facebookBumpPublicRecord),settings,triggerActive:facebookBumpTriggerActive(),mode:settings.mode};
+  const settings=facebookBumpSettings(rows(SHEETS.settings));return{posts:posts.map(facebookBumpPublicRecord),queue:queue.map(facebookBumpPublicRecord),history:history.map(facebookBumpPublicRecord),settings,triggerActive:facebookBumpTriggerActive(),mode:settings.mode};
 }
 
 function saveFacebookBumpPost(body,actor){return withLock(()=>{
@@ -123,7 +128,7 @@ function facebookBumpCreateJob(post,source,scheduledAt){
 
 function queueFacebookBumpNow(body,actor){return withLock(()=>{
   const post=facebookBumpRows(SHEETS.facebookBumpPosts).find(item=>String(item.id)===String(body.id)&&!item.deletedAt);if(!post)throw Error('ไม่พบโพสต์');
-  const queue=facebookBumpRows(SHEETS.facebookBumpQueue),active=facebookBumpActiveJob(queue,post.id);if(active)return output({ok:true,duplicate:true,jobId:active.jobId,message:'โพสต์นี้อยู่ในคิวแล้ว'});
+  const queue=facebookBumpRows(SHEETS.facebookBumpQueue),active=facebookBumpActiveJob(queue,post.id);if(active)return output({ok:true,duplicate:true,jobId:active.jobId,message:'โพสต์นี้มีงานรออยู่แล้ว'});
   const job=facebookBumpCreateJob(post,'MANUAL',new Date());log('FACEBOOK_BUMP_QUEUE_MANUAL','FACEBOOK_BUMP',post.id,post.name,actor.userId);return output({ok:true,jobId:job.jobId});
 });}
 
@@ -185,6 +190,13 @@ function ensureFacebookBumpTriggerAction(body,actor){
   const existing=ScriptApp.getProjectTriggers().filter(trigger=>trigger.getHandlerFunction()===FACEBOOK_BUMP_TRIGGER_HANDLER);
   if(!existing.length)ScriptApp.newTrigger(FACEBOOK_BUMP_TRIGGER_HANDLER).timeBased().everyMinutes(1).create();
   log('FACEBOOK_BUMP_TRIGGER','FACEBOOK_BUMP','','','DRY_RUN • '+actor.userId);return output({ok:true,active:true,created:!existing.length});
+}
+
+function disableFacebookBumpTriggerAction(body,actor){
+  requireRole(body.token,['OWNER','ADMIN']);
+  const existing=ScriptApp.getProjectTriggers().filter(trigger=>trigger.getHandlerFunction()===FACEBOOK_BUMP_TRIGGER_HANDLER);
+  existing.forEach(trigger=>ScriptApp.deleteTrigger(trigger));
+  log('FACEBOOK_BUMP_TRIGGER_OFF','FACEBOOK_BUMP','','',actor.userId);return output({ok:true,active:false,deleted:existing.length});
 }
 
 class DryRunFacebookBumpExecutor{

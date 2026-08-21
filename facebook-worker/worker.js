@@ -7,8 +7,9 @@ const { FACEBOOK_HOME, FacebookPageAdapter, classifyFacebookUrl } = require('./f
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.FACEBOOK_WORKER_PORT || 17821);
+const BACKEND_TIMEOUT_MS = Number(process.env.FACEBOOK_WORKER_BACKEND_TIMEOUT_MS || 45000);
 const PROFILE_DIR = path.resolve(__dirname, '..', '.facebook-worker-profile');
-const ALLOWED_ORIGINS = new Set((process.env.WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io,http://127.0.0.1:4173,http://127.0.0.1:4175').split(',').map((item) => item.trim()).filter(Boolean));
+const ALLOWED_ORIGINS = new Set((process.env.WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io,http://127.0.0.1:4173').split(',').map((item) => item.trim()).filter(Boolean));
 
 let context = null;
 let page = null;
@@ -16,14 +17,28 @@ let paired = null;
 let running = false;
 let lastError = '';
 let timer = null;
+let account = { name: '', identifier: '', checkedAt: '' };
 
 function publicStatus(connection = 'DISCONNECTED') {
-  return { ok: true, connection, paired: Boolean(paired), running, lastError };
+  const browserRunning = Boolean(context && page && !page.isClosed());
+  return { ok: true, worker: 'ONLINE', browser: browserRunning ? 'RUNNING' : 'STOPPED', connection, paired: Boolean(paired), running, lastError, workerPid: process.pid, browserProfile: path.basename(PROFILE_DIR), account: { ...account }, lastChecked: new Date().toISOString() };
+}
+
+async function refreshAccountIdentity(adapter) {
+  const identity = await adapter.accountIdentity(context);
+  account = { name: identity.name || '', identifier: identity.identifier || '', checkedAt: new Date().toISOString() };
+  return identity.state;
 }
 
 async function ensureBrowser() {
   if (!context) context = await chromium.launchPersistentContext(PROFILE_DIR, { channel: 'chrome', headless: false, viewport: null, args: ['--start-maximized'] });
   page = page && !page.isClosed() ? page : context.pages()[0] || await context.newPage();
+  try {
+    const cdp = await context.newCDPSession(page);
+    const { windowId } = await cdp.send('Browser.getWindowForTarget');
+    await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal', left: 80, top: 60, width: 1280, height: 820 } });
+    await cdp.detach();
+  } catch {}
   await page.bringToFront();
   return new FacebookPageAdapter(page);
 }
@@ -53,10 +68,17 @@ async function connectionStatus() {
 
 async function apiPost(payload) {
   if (!paired) throw Error('WORKER_NOT_PAIRED');
-  const response = await fetch(paired.apiUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...payload, token: paired.token }) });
-  const data = await response.json();
-  if (!data.ok) throw Error(data.error || 'BACKEND_REQUEST_FAILED');
-  return data;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
+  try {
+    const response = await fetch(paired.apiUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...payload, token: paired.token }), signal: controller.signal });
+    const data = await response.json();
+    if (!data.ok) throw Error(data.error || 'BACKEND_REQUEST_FAILED');
+    return data;
+  } catch (error) {
+    if (error && error.name === 'AbortError') throw Error('BACKEND_TIMEOUT');
+    throw error;
+  } finally { clearTimeout(timeout); }
 }
 
 async function finishJob(action, payload) {
@@ -124,7 +146,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/status') return res.end(JSON.stringify(await connectionStatus()));
     const body = await readBody(req);
     if (req.method === 'POST' && req.url === '/connect') return res.end(JSON.stringify(await openFacebookPage(FACEBOOK_HOME)));
-    if (req.method === 'POST' && req.url === '/test') return res.end(JSON.stringify(await connectionStatus()));
+    if (req.method === 'POST' && req.url === '/test') { const adapter = await ensureBrowser(); const connection = await refreshAccountIdentity(adapter); if (connection === 'CONNECTED') lastError = ''; return res.end(JSON.stringify(publicStatus(connection))); }
     if (req.method === 'POST' && req.url === '/open') return res.end(JSON.stringify(await openFacebookPage(body.url || FACEBOOK_HOME)));
     if (req.method === 'POST' && req.url === '/pair') { if (!/^https:\/\/script\.google\.com\/macros\/s\//.test(String(body.apiUrl || '')) || !body.token) throw Error('INVALID_PAIRING'); paired = { apiUrl: String(body.apiUrl), token: String(body.token) }; schedule(); return res.end(JSON.stringify(await connectionStatus())); }
     if (req.method === 'POST' && req.url === '/disconnect') { paired = null; running = false; clearInterval(timer); timer = null; if (context) await context.close(); context = null; page = null; return res.end(JSON.stringify(publicStatus('DISCONNECTED'))); }

@@ -47,6 +47,25 @@ class FacebookPageAdapter {
     return loginForm ? 'LOGIN_REQUIRED' : 'CONNECTED';
   }
 
+  async accountIdentity(context) {
+    const state = await this.connectionState();
+    if (state !== 'CONNECTED') return { state, name: '', identifier: '' };
+    const identityPage = await context.newPage();
+    try {
+      await identityPage.goto(`${FACEBOOK_HOME}me`, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      const identityState = classifyFacebookUrl(identityPage.url());
+      if (identityState !== 'CONNECTED') return { state: identityState, name: '', identifier: '' };
+      await identityPage.waitForTimeout(1500);
+      const heading = String(await identityPage.locator('main h1, [role="main"] h1, h1').first().textContent({ timeout: 8000 }).catch(() => '') || '').trim();
+      const metaTitle = String(await identityPage.locator('meta[property="og:title"]').getAttribute('content').catch(() => '') || '').trim();
+      const documentTitle = String(await identityPage.title().catch(() => '') || '').replace(/\s*[|·-]\s*Facebook\s*$/i, '').trim();
+      const name = heading || metaTitle || (/^facebook$/i.test(documentTitle) ? '' : documentTitle);
+      const currentUrl = new URL(identityPage.url());
+      const identifier = currentUrl.searchParams.get('id') || currentUrl.pathname.split('/').filter(Boolean)[0] || '';
+      return { state: 'CONNECTED', name: name.slice(0, 160), identifier: String(identifier).slice(0, 160) };
+    } finally { await identityPage.close().catch(() => {}); }
+  }
+
   async openPost(postUrl) {
     const url = new URL(String(postUrl || ''));
     if (!/^(?:www\.|m\.|web\.)?facebook\.com$/i.test(url.hostname) || url.protocol !== 'https:') throw Error('INVALID_POST_URL');
