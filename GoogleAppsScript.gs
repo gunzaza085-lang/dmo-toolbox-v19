@@ -23,7 +23,7 @@ const HEADERS = {
   wikiCache:['cachedAt','query','title','url','thumbnail','extract'],
   customerInteractions:['interactionId','createdAt','customerId','customerName','type','channel','note','nextFollowUpAt','admin'],
   reportSettings:['key','value','description'],
-  users:['userId','displayName','passwordHash','role','status','createdAt','updatedAt','lastLoginAt','passwordSalt','passwordAlgo','mustChangePassword','failedLoginCount','lockedUntil'],
+  users:['userId','displayName','passwordHash','role','status','createdAt','updatedAt','lastLoginAt','passwordSalt','passwordAlgo','mustChangePassword','failedLoginCount','lockedUntil','passwordFastHash','passwordFastAlgo'],
   sessions:['token','userId','role','createdAt','expiresAt','lastSeenAt','status'],
   backups:['backupId','createdAt','createdBy','reason','fileId','fileUrl','fileName','sizeBytes','status'],
   notifications:['notificationId','createdAt','type','severity','title','message','status','relatedId'],
@@ -76,7 +76,10 @@ function doPost(e){
     if(rawBody.length>(bulkImageRequest?12500000:200000))throw Error('คำขอมีขนาดใหญ่เกินกำหนด');
     const body=JSON.parse(rawBody);
     publicAction=body.action==='login'||body.action==='createOrder';
-    if(body.action==='login'){ensureDatabase();return login(body);}
+    // Login is a hot path. Deployment/migration prepares Users and Sessions;
+    // running the full database readiness check here adds synchronous service
+    // calls to every authentication attempt without improving verification.
+    if(body.action==='login')return login(body);
     if(body.action==='createOrder'){ensureDatabase();return createOrder(body);}
     if(body.action==='logout') return logout(body.token);
     ensureDatabase();
@@ -157,12 +160,15 @@ function sheet(name,headers){
   return s;
 }
 function ensureDatabase(){
-  const cache=CacheService.getScriptCache(),cacheKey='database-ready-'+DATABASE_VERSION;
+  const schemaKey=DATABASE_VERSION+'-gate-a-2',cache=CacheService.getScriptCache(),cacheKey='database-ready-'+schemaKey,properties=PropertiesService.getScriptProperties(),persistentKey='DATABASE_SCHEMA_READY_'+schemaKey.replace(/\W/g,'_');
   if(cache.get(cacheKey)==='TRUE')return;
+  if(properties.getProperty(persistentKey)==='TRUE'){cache.put(cacheKey,'TRUE',300);return;}
   sheet(SHEETS.seals,HEADERS.seals); sheet(SHEETS.items,HEADERS.items); sheet(SHEETS.services,HEADERS.services);
   sheet(SHEETS.settings,HEADERS.settings); sheet(SHEETS.orders,HEADERS.orders); sheet(SHEETS.orderRequests,HEADERS.orderRequests); sheet(SHEETS.logs,HEADERS.logs); sheet(SHEETS.stockLogs,HEADERS.stockLogs); sheet(SHEETS.stockRequests,HEADERS.stockRequests);
   sheet(SHEETS.customers,HEADERS.customers); sheet(SHEETS.customerInteractions,HEADERS.customerInteractions); sheet(SHEETS.promotions,HEADERS.promotions); sheet(SHEETS.promotionProducts,HEADERS.promotionProducts); sheet(SHEETS.system,HEADERS.system); sheet(SHEETS.trash,HEADERS.trash); sheet(SHEETS.wikiCache,HEADERS.wikiCache); sheet(SHEETS.reportSettings,HEADERS.reportSettings); sheet(SHEETS.users,HEADERS.users); sheet(SHEETS.sessions,HEADERS.sessions); sheet(SHEETS.backups,HEADERS.backups); sheet(SHEETS.notifications,HEADERS.notifications); sheet(SHEETS.orderItems,HEADERS.orderItems); sheet(SHEETS.imageRequests,HEADERS.imageRequests); ensureFacebookBumpDatabase();
   seedSettings(); seedDefaultPromotions(); seedMoneyTProduct(); seedSystem(); seedSecurity(); migrateLegacy();
+  properties.setProperty('SESSION_DAYS',String(settingValue('sessionDays',7)));
+  properties.setProperty(persistentKey,'TRUE');
   cache.put(cacheKey,'TRUE',300);
 }
 function seedSettings(){
@@ -215,13 +221,58 @@ function settingValue(key, fallback){
 }
 function randomSalt(){return Utilities.getUuid().replace(/-/g,'')+Utilities.getUuid().replace(/-/g,'');}
 function bytesToHex(bytes){return bytes.map(b=>('0'+((b<0?b+256:b).toString(16))).slice(-2)).join('');}
-function passwordHashV2(password,salt){
-  let value=Utilities.newBlob(String(salt)+'\u0000'+String(password||'')).getBytes();
-  const key=Utilities.newBlob(String(password||'')).getBytes();
-  for(let i=0;i<6000;i++)value=Utilities.computeHmacSha256Signature(value,key);
-  return bytesToHex(value);
+const PASSWORD_SHA256_K=[
+  0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+  0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+  0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+  0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+  0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+  0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+  0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+  0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+];
+function passwordRotr(value,bits){return(value>>>bits)|(value<<(32-bits));}
+function passwordUtf8Bytes(value){return Utilities.newBlob(String(value||'')).getBytes().map(b=>b<0?b+256:b);}
+const PASSWORD_SHA256_INITIAL=[0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+function passwordSha256Compress(state,bytes,offset,w){
+  for(let i=0;i<16;i++){const j=offset+i*4;w[i]=((bytes[j]<<24)|(bytes[j+1]<<16)|(bytes[j+2]<<8)|bytes[j+3])>>>0;}
+  for(let i=16;i<64;i++){const x=w[i-15],y=w[i-2],s0=(passwordRotr(x,7)^passwordRotr(x,18)^(x>>>3))>>>0,s1=(passwordRotr(y,17)^passwordRotr(y,19)^(y>>>10))>>>0;w[i]=(w[i-16]+s0+w[i-7]+s1)>>>0;}
+  let a=state[0],b=state[1],c=state[2],d=state[3],e=state[4],f=state[5],g=state[6],h=state[7];
+  for(let i=0;i<64;i++){const s1=(passwordRotr(e,6)^passwordRotr(e,11)^passwordRotr(e,25))>>>0,ch=((e&f)^((~e)&g))>>>0,t1=(h+s1+ch+PASSWORD_SHA256_K[i]+w[i])>>>0,s0=(passwordRotr(a,2)^passwordRotr(a,13)^passwordRotr(a,22))>>>0,maj=((a&b)^(a&c)^(b&c))>>>0,t2=(s0+maj)>>>0;h=g;g=f;f=e;e=(d+t1)>>>0;d=c;c=b;b=a;a=(t1+t2)>>>0;}
+  state[0]=(state[0]+a)>>>0;state[1]=(state[1]+b)>>>0;state[2]=(state[2]+c)>>>0;state[3]=(state[3]+d)>>>0;state[4]=(state[4]+e)>>>0;state[5]=(state[5]+f)>>>0;state[6]=(state[6]+g)>>>0;state[7]=(state[7]+h)>>>0;return state;
 }
-function securePasswordRecord(password){const salt=randomSalt();return{salt,hash:passwordHashV2(password,salt),algo:PASSWORD_ALGO};}
+function passwordSha256StateToBytes(state){const result=[];state.forEach(value=>result.push((value>>>24)&255,(value>>>16)&255,(value>>>8)&255,value&255));return result;}
+function passwordSha256Bytes(input){
+  const bytes=input.map(b=>b&255),bitLength=bytes.length*8;bytes.push(0x80);while(bytes.length%64!==56)bytes.push(0);
+  const high=Math.floor(bitLength/0x100000000),low=bitLength>>>0;for(let i=3;i>=0;i--)bytes.push((high>>>(i*8))&255);for(let i=3;i>=0;i--)bytes.push((low>>>(i*8))&255);
+  const state=PASSWORD_SHA256_INITIAL.slice(),w=new Array(64);for(let offset=0;offset<bytes.length;offset+=64)passwordSha256Compress(state,bytes,offset,w);return passwordSha256StateToBytes(state);
+}
+function passwordSha256PrefixState(block){const state=PASSWORD_SHA256_INITIAL.slice();return passwordSha256Compress(state,block,0,new Array(64));}
+function passwordSha256FromPrefix(prefixState,suffix){
+  const bytes=suffix.map(b=>b&255),bitLength=(64+bytes.length)*8;bytes.push(0x80);while(bytes.length%64!==56)bytes.push(0);
+  const high=Math.floor(bitLength/0x100000000),low=bitLength>>>0;for(let i=3;i>=0;i--)bytes.push((high>>>(i*8))&255);for(let i=3;i>=0;i--)bytes.push((low>>>(i*8))&255);
+  const state=prefixState.slice(),w=new Array(64);for(let offset=0;offset<bytes.length;offset+=64)passwordSha256Compress(state,bytes,offset,w);return state;
+}
+function passwordSha256Fixed32(prefixState,suffixWords,out,w){
+  for(let i=0;i<8;i++)w[i]=suffixWords[i]>>>0;w[8]=0x80000000;for(let i=9;i<15;i++)w[i]=0;w[15]=768;
+  for(let i=16;i<64;i++){const x=w[i-15],y=w[i-2],s0=(passwordRotr(x,7)^passwordRotr(x,18)^(x>>>3))>>>0,s1=(passwordRotr(y,17)^passwordRotr(y,19)^(y>>>10))>>>0;w[i]=(w[i-16]+s0+w[i-7]+s1)>>>0;}
+  let a=prefixState[0],b=prefixState[1],c=prefixState[2],d=prefixState[3],e=prefixState[4],f=prefixState[5],g=prefixState[6],h=prefixState[7];
+  for(let i=0;i<64;i++){const s1=(passwordRotr(e,6)^passwordRotr(e,11)^passwordRotr(e,25))>>>0,ch=((e&f)^((~e)&g))>>>0,t1=(h+s1+ch+PASSWORD_SHA256_K[i]+w[i])>>>0,s0=(passwordRotr(a,2)^passwordRotr(a,13)^passwordRotr(a,22))>>>0,maj=((a&b)^(a&c)^(b&c))>>>0,t2=(s0+maj)>>>0;h=g;g=f;f=e;e=(d+t1)>>>0;d=c;c=b;b=a;a=(t1+t2)>>>0;}
+  out[0]=(prefixState[0]+a)>>>0;out[1]=(prefixState[1]+b)>>>0;out[2]=(prefixState[2]+c)>>>0;out[3]=(prefixState[3]+d)>>>0;out[4]=(prefixState[4]+e)>>>0;out[5]=(prefixState[5]+f)>>>0;out[6]=(prefixState[6]+g)>>>0;out[7]=(prefixState[7]+h)>>>0;return out;
+}
+function passwordWordsToHex(words){let result='';for(let i=0;i<words.length;i++)result+=('00000000'+(words[i]>>>0).toString(16)).slice(-8);return result;}
+function passwordHashV2(password,salt){
+  let value=passwordUtf8Bytes(String(salt)+'\u0000'+String(password||'')),key=passwordUtf8Bytes(password);if(key.length>64)key=passwordSha256Bytes(key);while(key.length<64)key.push(0);
+  const innerState=passwordSha256PrefixState(key.map(b=>b^0x36)),outerState=passwordSha256PrefixState(key.map(b=>b^0x5c)),w=new Array(64),next=new Array(8);
+  let current=passwordSha256Fixed32(outerState,passwordSha256FromPrefix(innerState,value),new Array(8),w);
+  for(let i=1;i<6000;i++){passwordSha256Fixed32(innerState,current,next,w);passwordSha256Fixed32(outerState,next,current,w);}
+  return passwordWordsToHex(current);
+}
+const PASSWORD_FAST_ALGO='HMAC-SHA256-PEPPER-V1';
+function passwordFastPepper(){const properties=PropertiesService.getScriptProperties();let pepper=properties.getProperty('PASSWORD_PEPPER_V1');if(!pepper){pepper=randomSalt();properties.setProperty('PASSWORD_PEPPER_V1',pepper);}return pepper;}
+function passwordFastHash(password,salt,pepper){return bytesToHex(Utilities.computeHmacSha256Signature(String(salt)+'\u0000'+String(password||''),pepper||passwordFastPepper(),Utilities.Charset.UTF_8));}
+function passwordFastMatches(password,stored,salt,algo,pepper){return String(algo||'')===PASSWORD_FAST_ALGO&&!!salt&&passwordFastHash(password,salt,pepper)===String(stored||'');}
+function securePasswordRecord(password){const salt=randomSalt();return{salt,hash:passwordHashV2(password,salt),algo:PASSWORD_ALGO,fastHash:passwordFastHash(password,salt),fastAlgo:PASSWORD_FAST_ALGO};}
 function passwordMatches(password,stored,salt,algo){return String(algo||'')===PASSWORD_ALGO&&salt?passwordHashV2(password,salt)===String(stored||''):sha256(password)===String(stored||'');}
 function environmentInfo(){const id=ss().getId();return{environment:id===PRODUCTION_SPREADSHEET_ID?'PRODUCTION':id===TEST_SPREADSHEET_ID?'TEST':'BACKUP',ownerSetupAllowed:id===PRODUCTION_SPREADSHEET_ID||id===TEST_SPREADSHEET_ID};}
 function seedSecurity(){
@@ -242,10 +293,10 @@ function cleanupSessions(){
   for(let i=v.length-1;i>=1;i--){if(String(v[i][status])!=='ACTIVE'||new Date(v[i][exp]).getTime()<now)s.deleteRow(i+1);}
 }
 function getSession(token,touch){
-  if(!token)return null;const s=sheet(SHEETS.sessions,HEADERS.sessions),v=s.getDataRange().getValues(),h=v[0].map(String),now=Date.now();
+  if(!token)return null;const s=ss().getSheetByName(SHEETS.sessions);if(!s||s.getLastRow()<2)return null;const v=s.getDataRange().getValues(),h=v[0].map(String),now=Date.now();
   for(let i=1;i<v.length;i++)if(String(v[i][0])===String(token)&&String(v[i][h.indexOf('status')])==='ACTIVE'){
     if(new Date(v[i][h.indexOf('expiresAt')]).getTime()<now){s.getRange(i+1,h.indexOf('status')+1).setValue('EXPIRED');return null;}
-    if(touch)s.getRange(i+1,h.indexOf('lastSeenAt')+1).setValue(new Date());
+    if(touch&&now-new Date(v[i][h.indexOf('lastSeenAt')]).getTime()>300000)s.getRange(i+1,h.indexOf('lastSeenAt')+1).setValue(new Date());
     return Object.fromEntries(h.map((k,j)=>[k,v[i][j]]));
   }return null;
 }
@@ -255,27 +306,27 @@ function requireRole(token,allowed){const a=currentActor(token);if(!a)throw Erro
 function loginThrottleKey(id){return'login-'+sha256(String(id||'').toLowerCase()).slice(0,32);}
 function registerUnknownLoginFailure(id){const c=CacheService.getScriptCache(),k=loginThrottleKey(id),n=number(c.get(k))+1;c.put(k,String(n),900);if(n>=6)throw Error('ลองเข้าสู่ระบบหลายครั้งเกินไป กรุณารอ 15 นาที');}
 function login(b){
-  const u=sheet(SHEETS.users,HEADERS.users),v=u.getDataRange().getValues(),h=v[0].map(String),id=String(b.adminId||'').trim(),password=String(b.password||''),now=new Date();
+  const db=ss(),properties=PropertiesService.getScriptProperties().getProperties(),u=db.getSheetByName(SHEETS.users),v=u.getDataRange().getValues(),h=v[0].map(String),id=String(b.adminId||'').trim(),password=String(b.password||''),now=new Date();
   for(let i=1;i<v.length;i++)if(String(v[i][h.indexOf('userId')])===id){
     const row=i+1,status=String(v[i][h.indexOf('status')]||'ACTIVE'),lockedAt=v[i][h.indexOf('lockedUntil')],lockedUntil=lockedAt?new Date(lockedAt):null;
     if(status==='RESET_REQUIRED')throw Error('บัญชีนี้ต้องตั้งรหัสผ่านใหม่ในชีต Users ก่อนใช้งาน');
     if(status!=='ACTIVE')throw Error('ไอดีหรือรหัสผ่านไม่ถูกต้อง');
     if(lockedUntil&&lockedUntil.getTime()>Date.now())throw Error('บัญชีถูกล็อกชั่วคราว กรุณาลองใหม่ภายหลัง');
-    const algo=String(v[i][h.indexOf('passwordAlgo')]||''),salt=String(v[i][h.indexOf('passwordSalt')]||''),stored=String(v[i][h.indexOf('passwordHash')]||'');
-    const valid=passwordMatches(password,stored,salt,algo);
+    const algo=String(v[i][h.indexOf('passwordAlgo')]||''),salt=String(v[i][h.indexOf('passwordSalt')]||''),stored=String(v[i][h.indexOf('passwordHash')]||''),fastStored=String(v[i][h.indexOf('passwordFastHash')]||''),fastAlgo=String(v[i][h.indexOf('passwordFastAlgo')]||'');
+    const valid=fastStored?passwordFastMatches(password,fastStored,salt,fastAlgo,properties.PASSWORD_PEPPER_V1):passwordMatches(password,stored,salt,algo);
     if(!valid){const count=number(v[i][h.indexOf('failedLoginCount')])+1;u.getRange(row,h.indexOf('failedLoginCount')+1).setValue(count);if(count>=5)u.getRange(row,h.indexOf('lockedUntil')+1).setValue(new Date(Date.now()+15*60000));securityLog('LOGIN_FAILED',id,'INVALID_CREDENTIALS');throw Error(count>=5?'บัญชีถูกล็อกชั่วคราว กรุณาลองใหม่ภายหลัง':'ไอดีหรือรหัสผ่านไม่ถูกต้อง');}
-    if(algo!==PASSWORD_ALGO){const rec=securePasswordRecord(password);u.getRange(row,h.indexOf('passwordHash')+1).setValue(rec.hash);u.getRange(row,h.indexOf('passwordSalt')+1).setValue(rec.salt);u.getRange(row,h.indexOf('passwordAlgo')+1).setValue(rec.algo);}
-    const token=Utilities.getUuid()+Utilities.getUuid(),days=Math.max(1,Math.min(30,Number(settingValue('sessionDays',7))||7)),expires=new Date(now.getTime()+days*86400000),role=String(v[i][h.indexOf('role')]||'VIEWER');
-    sheet(SHEETS.sessions,HEADERS.sessions).appendRow([token,id,role,now,expires,now,'ACTIVE']);[['lastLoginAt',now],['failedLoginCount',0],['lockedUntil','']].forEach(x=>u.getRange(row,h.indexOf(x[0])+1).setValue(x[1]));cleanupSessions();securityLog('LOGIN_SUCCESS',id,role);
+    const passwordUpgrade=algo!==PASSWORD_ALGO?securePasswordRecord(password):!fastStored?{fastHash:passwordFastHash(password,salt),fastAlgo:PASSWORD_FAST_ALGO}:null;
+    const token=Utilities.getUuid()+Utilities.getUuid(),days=Math.max(1,Math.min(30,Number(properties.SESSION_DAYS||7)||7)),expires=new Date(now.getTime()+days*86400000),role=String(v[i][h.indexOf('role')]||'VIEWER');
+    db.getSheetByName(SHEETS.sessions).appendRow([token,id,role,now,expires,now,'ACTIVE']);const needsUserWrite=!!passwordUpgrade||number(v[i][h.indexOf('failedLoginCount')])>0||!!lockedAt;if(needsUserWrite){const updatedUser=v[i].slice();if(passwordUpgrade){if(passwordUpgrade.hash){updatedUser[h.indexOf('passwordHash')]=passwordUpgrade.hash;updatedUser[h.indexOf('passwordSalt')]=passwordUpgrade.salt;updatedUser[h.indexOf('passwordAlgo')]=passwordUpgrade.algo;}updatedUser[h.indexOf('passwordFastHash')]=passwordUpgrade.fastHash;updatedUser[h.indexOf('passwordFastAlgo')]=passwordUpgrade.fastAlgo;}updatedUser[h.indexOf('failedLoginCount')]=0;updatedUser[h.indexOf('lockedUntil')]='';u.getRange(row,1,1,h.length).setValues([updatedUser]);}
     return output({ok:true,token,user:{userId:id,displayName:String(v[i][h.indexOf('displayName')]||id),role,mustChangePassword:String(v[i][h.indexOf('mustChangePassword')]||'FALSE')==='TRUE'},expiresAt:expires});
   }registerUnknownLoginFailure(id);securityLog('LOGIN_FAILED',id,'UNKNOWN_USER');throw Error('ไอดีหรือรหัสผ่านไม่ถูกต้อง');
 }
 function logout(token){const s=sheet(SHEETS.sessions,HEADERS.sessions),v=s.getDataRange().getValues(),h=v[0].map(String);for(let i=1;i<v.length;i++)if(String(v[i][0])===String(token)){s.getRange(i+1,h.indexOf('status')+1).setValue('LOGGED_OUT');break;}return output({ok:true});}
-function securityLog(action,userId,details){sheet(SHEETS.logs,HEADERS.logs).appendRow([new Date(),action,'SECURITY',userId||'','',details||'']);}
+function securityLog(action,userId,details){const s=ss().getSheetByName(SHEETS.logs)||sheet(SHEETS.logs,HEADERS.logs);s.appendRow([new Date(),action,'SECURITY',userId||'','',details||'']);}
 function invalidateUserSessions(userId){const s=sheet(SHEETS.sessions,HEADERS.sessions),v=s.getDataRange().getValues();if(v.length<2)return 0;const h=v[0].map(String),uid=h.indexOf('userId'),status=h.indexOf('status');let count=0;for(let i=1;i<v.length;i++)if(String(v[i][uid])===String(userId)&&String(v[i][status])==='ACTIVE'){s.getRange(i+1,status+1).setValue('PASSWORD_CHANGED');count++;}return count;}
-function changeOwnerPassword(b,actor){return withLock(()=>{const verified=requireRole(b.token,['OWNER']);if(String(actor.userId)!==String(verified.userId))throw Error('ไม่สามารถยืนยันบัญชีผู้ใช้ได้');const current=String(b.currentPassword||''),next=String(b.newPassword||''),confirm=String(b.confirmPassword||'');if(!current)throw Error('กรุณากรอกรหัสผ่านปัจจุบัน');if(next.length<10)throw Error('รหัสผ่านใหม่ต้องมีอย่างน้อย 10 ตัวอักษร');if(next!==confirm)throw Error('รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน');if(current===next)throw Error('รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสผ่านปัจจุบัน');const s=sheet(SHEETS.users,HEADERS.users),v=s.getDataRange().getValues(),h=v[0].map(String),uid=h.indexOf('userId');let row=-1;for(let i=1;i<v.length;i++)if(String(v[i][uid])===String(actor.userId)){row=i+1;break;}if(row<0||String(v[row-1][h.indexOf('role')])!=='OWNER'||String(v[row-1][h.indexOf('status')])!=='ACTIVE')throw Error('ไม่พบบัญชี OWNER ที่พร้อมใช้งาน');if(!passwordMatches(current,v[row-1][h.indexOf('passwordHash')],v[row-1][h.indexOf('passwordSalt')],v[row-1][h.indexOf('passwordAlgo')])){securityLog('OWNER_PASSWORD_CHANGE_REJECTED',actor.userId,'INVALID_CURRENT_PASSWORD');throw Error('รหัสผ่านปัจจุบันไม่ถูกต้อง');}const rec=securePasswordRecord(next),set=(k,val)=>{const c=h.indexOf(k);if(c>=0)s.getRange(row,c+1).setValue(val);};set('passwordHash',rec.hash);set('passwordSalt',rec.salt);set('passwordAlgo',rec.algo);set('mustChangePassword','FALSE');set('failedLoginCount',0);set('lockedUntil','');set('updatedAt',new Date());const revoked=invalidateUserSessions(actor.userId);securityLog('OWNER_PASSWORD_CHANGED',actor.userId,'SESSIONS_REVOKED='+revoked);return output({ok:true,message:'เปลี่ยนรหัสผ่านสำเร็จ กรุณาเข้าสู่ระบบอีกครั้ง'});});}
+function changeOwnerPassword(b,actor){return withLock(()=>{const verified=requireRole(b.token,['OWNER']);if(String(actor.userId)!==String(verified.userId))throw Error('ไม่สามารถยืนยันบัญชีผู้ใช้ได้');const current=String(b.currentPassword||''),next=String(b.newPassword||''),confirm=String(b.confirmPassword||'');if(!current)throw Error('กรุณากรอกรหัสผ่านปัจจุบัน');if(next.length<10)throw Error('รหัสผ่านใหม่ต้องมีอย่างน้อย 10 ตัวอักษร');if(next!==confirm)throw Error('รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน');if(current===next)throw Error('รหัสผ่านใหม่ต้องไม่ซ้ำกับรหัสผ่านปัจจุบัน');const s=sheet(SHEETS.users,HEADERS.users),v=s.getDataRange().getValues(),h=v[0].map(String),uid=h.indexOf('userId');let row=-1;for(let i=1;i<v.length;i++)if(String(v[i][uid])===String(actor.userId)){row=i+1;break;}if(row<0||String(v[row-1][h.indexOf('role')])!=='OWNER'||String(v[row-1][h.indexOf('status')])!=='ACTIVE')throw Error('ไม่พบบัญชี OWNER ที่พร้อมใช้งาน');const salt=v[row-1][h.indexOf('passwordSalt')],fastStored=v[row-1][h.indexOf('passwordFastHash')],validCurrent=fastStored?passwordFastMatches(current,fastStored,salt,v[row-1][h.indexOf('passwordFastAlgo')]):passwordMatches(current,v[row-1][h.indexOf('passwordHash')],salt,v[row-1][h.indexOf('passwordAlgo')]);if(!validCurrent){securityLog('OWNER_PASSWORD_CHANGE_REJECTED',actor.userId,'INVALID_CURRENT_PASSWORD');throw Error('รหัสผ่านปัจจุบันไม่ถูกต้อง');}const rec=securePasswordRecord(next),set=(k,val)=>{const c=h.indexOf(k);if(c>=0)s.getRange(row,c+1).setValue(val);};set('passwordHash',rec.hash);set('passwordSalt',rec.salt);set('passwordAlgo',rec.algo);set('passwordFastHash',rec.fastHash);set('passwordFastAlgo',rec.fastAlgo);set('mustChangePassword','FALSE');set('failedLoginCount',0);set('lockedUntil','');set('updatedAt',new Date());const revoked=invalidateUserSessions(actor.userId);securityLog('OWNER_PASSWORD_CHANGED',actor.userId,'SESSIONS_REVOKED='+revoked);return output({ok:true,message:'เปลี่ยนรหัสผ่านสำเร็จ กรุณาเข้าสู่ระบบอีกครั้ง'});});}
 function listUsers(source){return (source||rows(SHEETS.users)).map(x=>({userId:x.userId,displayName:x.displayName,role:x.role,status:x.status,createdAt:x.createdAt,updatedAt:x.updatedAt,lastLoginAt:x.lastLoginAt}));}
-function saveSecurityUser(b,actor){return withLock(()=>{requireRole(b.token,['OWNER']);const p=b.user||{},id=String(p.userId||'').trim();if(!id)throw Error('กรุณากรอก User ID');if(p.password&&String(p.password).length<10)throw Error('รหัสผ่านต้องมีอย่างน้อย 10 ตัวอักษร');const role=['OWNER','ADMIN','STAFF','VIEWER'].includes(p.role)?p.role:'VIEWER',s=sheet(SHEETS.users,HEADERS.users),v=s.getDataRange().getValues(),h=v[0].map(String),now=new Date();let row=-1;for(let i=1;i<v.length;i++)if(String(v[i][0])===id){row=i+1;break;}const rec=p.password?securePasswordRecord(p.password):null;if(row<0){if(!rec)throw Error('ผู้ใช้ใหม่ต้องกำหนดรหัสผ่าน');const data={userId:id,displayName:p.displayName||id,passwordHash:rec.hash,role,status:p.status||'ACTIVE',createdAt:now,updatedAt:now,lastLoginAt:'',passwordSalt:rec.salt,passwordAlgo:rec.algo,mustChangePassword:'FALSE',failedLoginCount:0,lockedUntil:''};s.appendRow(HEADERS.users.map(k=>data[k]??''));}else{const set=(k,val)=>{const c=h.indexOf(k);if(c>=0)s.getRange(row,c+1).setValue(val);};set('displayName',p.displayName||id);set('role',role);set('status',p.status||'ACTIVE');set('updatedAt',now);if(rec){set('passwordHash',rec.hash);set('passwordSalt',rec.salt);set('passwordAlgo',rec.algo);set('mustChangePassword','FALSE');set('failedLoginCount',0);set('lockedUntil','');}}securityLog('USER_SAVE',actor.userId,id+' '+role);return output({ok:true});});}
+function saveSecurityUser(b,actor){return withLock(()=>{requireRole(b.token,['OWNER']);const p=b.user||{},id=String(p.userId||'').trim();if(!id)throw Error('กรุณากรอก User ID');if(p.password&&String(p.password).length<10)throw Error('รหัสผ่านต้องมีอย่างน้อย 10 ตัวอักษร');const role=['OWNER','ADMIN','STAFF','VIEWER'].includes(p.role)?p.role:'VIEWER',s=sheet(SHEETS.users,HEADERS.users),v=s.getDataRange().getValues(),h=v[0].map(String),now=new Date();let row=-1;for(let i=1;i<v.length;i++)if(String(v[i][0])===id){row=i+1;break;}const rec=p.password?securePasswordRecord(p.password):null;if(row<0){if(!rec)throw Error('ผู้ใช้ใหม่ต้องกำหนดรหัสผ่าน');const data={userId:id,displayName:p.displayName||id,passwordHash:rec.hash,role,status:p.status||'ACTIVE',createdAt:now,updatedAt:now,lastLoginAt:'',passwordSalt:rec.salt,passwordAlgo:rec.algo,mustChangePassword:'FALSE',failedLoginCount:0,lockedUntil:'',passwordFastHash:rec.fastHash,passwordFastAlgo:rec.fastAlgo};s.appendRow(HEADERS.users.map(k=>data[k]??''));}else{const set=(k,val)=>{const c=h.indexOf(k);if(c>=0)s.getRange(row,c+1).setValue(val);};set('displayName',p.displayName||id);set('role',role);set('status',p.status||'ACTIVE');set('updatedAt',now);if(rec){set('passwordHash',rec.hash);set('passwordSalt',rec.salt);set('passwordAlgo',rec.algo);set('passwordFastHash',rec.fastHash);set('passwordFastAlgo',rec.fastAlgo);set('mustChangePassword','FALSE');set('failedLoginCount',0);set('lockedUntil','');}}securityLog('USER_SAVE',actor.userId,id+' '+role);return output({ok:true});});}
 function migrateLegacy(){
   const target=sheet(SHEETS.seals,HEADERS.seals); if(target.getLastRow()>1)return;
   const legacy=ss().getSheetByName('Prices'); if(legacy&&legacy.getLastRow()>1){migrateRowsFromSheet(legacy,'PRICES');return;}
@@ -467,7 +518,7 @@ function sortCatalog(s,headers,kind){
 }
 function saveSettings(settingsObj,actor){return withLock(()=>{
   const s=sheet(SHEETS.settings,HEADERS.settings),values=s.getDataRange().getValues(),rowByKey=new Map();for(let i=1;i<values.length;i++)rowByKey.set(String(values[i][0]),i+1);
-  Object.keys(settingsObj||{}).forEach(k=>{const row=rowByKey.get(k);if(!row){s.appendRow([k,settingsObj[k],'']);rowByKey.set(k,s.getLastRow());}else s.getRange(row,2).setValue(settingsObj[k]);});
+  Object.keys(settingsObj||{}).forEach(k=>{const row=rowByKey.get(k);if(!row){s.appendRow([k,settingsObj[k],'']);rowByKey.set(k,s.getLastRow());}else s.getRange(row,2).setValue(settingsObj[k]);});if(Object.prototype.hasOwnProperty.call(settingsObj||{},'sessionDays'))PropertiesService.getScriptProperties().setProperty('SESSION_DAYS',String(settingsObj.sessionDays));
   log('SETTINGS','SYSTEM','','',actor||'SYSTEM');return output({ok:true});
 });}
 function productSaleUnit(product){return String(product.unit||((product.kind||'')==='SEAL'?'ชุด':(product.kind||'')==='TMONEY'?'T':'ชิ้น'));}

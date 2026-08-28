@@ -1,6 +1,7 @@
 'use strict';
 
 const http = require('http');
+const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright-core');
 const { FACEBOOK_HOME, FacebookPageAdapter, classifyFacebookUrl } = require('./facebook-page');
@@ -8,7 +9,11 @@ const { FACEBOOK_HOME, FacebookPageAdapter, classifyFacebookUrl } = require('./f
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.FACEBOOK_WORKER_PORT || 17821);
 const BACKEND_TIMEOUT_MS = Number(process.env.FACEBOOK_WORKER_BACKEND_TIMEOUT_MS || 45000);
-const PROFILE_DIR = path.resolve(__dirname, '..', '.facebook-worker-profile');
+const LEGACY_PROFILE_DIR = path.resolve(__dirname, '..', '.facebook-worker-profile');
+const PORTABLE_PROFILE_DIR = process.env.LOCALAPPDATA
+  ? path.join(process.env.LOCALAPPDATA, 'GUN-SHOP-DMO', 'FacebookWorkerProfile')
+  : LEGACY_PROFILE_DIR;
+const PROFILE_DIR = path.resolve(process.env.FACEBOOK_WORKER_PROFILE_DIR || (fs.existsSync(LEGACY_PROFILE_DIR) ? LEGACY_PROFILE_DIR : PORTABLE_PROFILE_DIR));
 const ALLOWED_ORIGINS = new Set((process.env.WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io,http://127.0.0.1:4173').split(',').map((item) => item.trim()).filter(Boolean));
 
 let context = null;

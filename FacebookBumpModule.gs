@@ -11,13 +11,15 @@ const FACEBOOK_BUMP_ACTIVE_JOB_STATUSES=['PENDING','PROCESSING'];
 const FACEBOOK_BUMP_JOB_STATUSES=['PENDING','PROCESSING','COMPLETED','FAILED','CANCELLED'];
 
 function ensureFacebookBumpDatabase(){
-  const cache=CacheService.getScriptCache(),cacheKey='facebook-bump-ready-'+DATABASE_VERSION;
+  const cache=CacheService.getScriptCache(),cacheKey='facebook-bump-ready-'+DATABASE_VERSION,properties=PropertiesService.getScriptProperties(),persistentKey='FACEBOOK_BUMP_SCHEMA_READY_'+DATABASE_VERSION.replace(/\W/g,'_');
   if(cache.get(cacheKey)==='TRUE')return;
+  if(properties.getProperty(persistentKey)==='TRUE'){cache.put(cacheKey,'TRUE',300);return;}
   sheet(SHEETS.facebookBumpPosts,HEADERS.facebookBumpPosts);
   sheet(SHEETS.facebookBumpQueue,HEADERS.facebookBumpQueue);
   sheet(SHEETS.facebookBumpHistory,HEADERS.facebookBumpHistory);
   sheet(SHEETS.facebookOwnedComments,HEADERS.facebookOwnedComments);
   facebookBumpRepairLiteralErrors();
+  properties.setProperty(persistentKey,'TRUE');
   cache.put(cacheKey,'TRUE',300);
 }
 
@@ -35,6 +37,12 @@ function facebookBumpRows(name){
   if(lastRow<2)return[];
   const headers=s.getRange(1,1,1,lastCol).getValues()[0].map(String),values=s.getRange(2,1,lastRow-1,lastCol).getValues();
   return values.map((row,index)=>{const record={_row:index+2};headers.forEach((header,column)=>{if(header)record[header]=row[column];});return record;})
+    .filter(record=>headers.some(header=>header&&String(record[header]??'').trim()!==''));
+}
+function facebookBumpReadRowsFast(name){
+  const s=ss().getSheetByName(name);if(!s||s.getLastRow()<2)return[];
+  const values=s.getDataRange().getValues(),headers=values[0].map(String);
+  return values.slice(1).map((row,index)=>{const record={_row:index+2};headers.forEach((header,column)=>{if(header)record[header]=row[column];});return record;})
     .filter(record=>headers.some(header=>header&&String(record[header]??'').trim()!==''));
 }
 
@@ -84,10 +92,10 @@ function facebookBumpPublicRecord(record){const outputRecord={};Object.keys(reco
 function getFacebookBumpData(actor){
   if(!actor||!['OWNER','ADMIN'].includes(String(actor.role)))return null;
   ensureFacebookBumpDatabase();
-  const posts=facebookBumpRows(SHEETS.facebookBumpPosts).filter(post=>!post.deletedAt).sort((a,b)=>String(a.name).localeCompare(String(b.name),'th'));
-  const queue=facebookBumpRows(SHEETS.facebookBumpQueue).sort((a,b)=>facebookBumpDateValue(b.createdAt)-facebookBumpDateValue(a.createdAt)).slice(0,300);
-  const history=facebookBumpRows(SHEETS.facebookBumpHistory).sort((a,b)=>facebookBumpDateValue(b.createdAt)-facebookBumpDateValue(a.createdAt)).slice(0,500);
-  const settings=facebookBumpSettings(rows(SHEETS.settings));return{posts:posts.map(facebookBumpPublicRecord),queue:queue.map(facebookBumpPublicRecord),history:history.map(facebookBumpPublicRecord),settings,triggerActive:facebookBumpTriggerActive(),mode:settings.mode};
+  const posts=facebookBumpReadRowsFast(SHEETS.facebookBumpPosts).filter(post=>!post.deletedAt).sort((a,b)=>String(a.name).localeCompare(String(b.name),'th'));
+  const queue=facebookBumpReadRowsFast(SHEETS.facebookBumpQueue).sort((a,b)=>facebookBumpDateValue(b.createdAt)-facebookBumpDateValue(a.createdAt)).slice(0,300);
+  const history=facebookBumpReadRowsFast(SHEETS.facebookBumpHistory).sort((a,b)=>facebookBumpDateValue(b.createdAt)-facebookBumpDateValue(a.createdAt)).slice(0,500);
+  const settings=facebookBumpSettings(facebookBumpReadRowsFast(SHEETS.settings));return{posts:posts.map(facebookBumpPublicRecord),queue:queue.map(facebookBumpPublicRecord),history:history.map(facebookBumpPublicRecord),settings,triggerActive:facebookBumpTriggerActive(),mode:settings.mode};
 }
 
 function saveFacebookBumpPost(body,actor){return withLock(()=>{

@@ -115,7 +115,11 @@ class FacebookPageAdapter {
         let href = '';
         while (!href && Date.now() < referenceDeadline) {
           const afterReferences = await this.exactCommentReferences(text);
-          href = selectNewVerifiedReference(beforeReferences, afterReferences);
+          // Facebook may navigate the active page to the newly-created
+          // comment without rendering a permalink inside the article yet.
+          // Treat that URL as a verified candidate so the worker records the
+          // real comment_id instead of falling back to an UNVERIFIED handle.
+          href = selectNewVerifiedReference(beforeReferences, [this.page.url(), ...afterReferences]);
           if (!href) await this.page.waitForTimeout(500);
         }
         return { ok: true, externalCommentId: href || stableReference(`${this.page.url()}|${text}|${Date.now()}`), verifiedReference: Boolean(href) };
