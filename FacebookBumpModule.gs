@@ -147,6 +147,7 @@ function cancelFacebookBumpJob(body,actor){return withLock(()=>{
 
 function retryFacebookBumpJob(body,actor){return withLock(()=>{
   const job=facebookBumpRows(SHEETS.facebookBumpQueue).find(item=>String(item.jobId)===String(body.jobId));if(!job)throw Error('ไม่พบงานในคิว');if(String(job.status)!=='FAILED')throw Error('Retry ได้เฉพาะงานที่ล้มเหลว');
+  if(/NEEDS_REVIEW/.test(String(job.error||'')))throw Error('งานนี้อาจส่ง Comment สำเร็จก่อน Worker หยุด กรุณาตรวจ Facebook และสร้างงานใหม่หลังยืนยัน ห้าม Retry อัตโนมัติ');
   if(facebookBumpActiveJob(facebookBumpRows(SHEETS.facebookBumpQueue),job.targetPostId))return output({ok:true,duplicate:true,message:'โพสต์นี้มีงานรออยู่แล้ว'});
   job.status='PENDING';job.error='';job.scheduledAt=new Date();job.updatedAt=new Date();job.source='RETRY';facebookBumpWriteRow(SHEETS.facebookBumpQueue,job);log('FACEBOOK_BUMP_RETRY','FACEBOOK_BUMP',job.targetPostId,job.postName,actor.userId);return output({ok:true});
 });}
@@ -168,7 +169,7 @@ function saveFacebookBumpSettings(body,actor){return withLock(()=>{
 
 function claimFacebookBumpJob(body,actor){return withLock(()=>{
   const now=new Date(),settings=facebookBumpSettings();if(settings.mode!=='REAL')return output({ok:true,job:null,reason:'DRY_RUN'});if(settings.paused)return output({ok:true,job:null,reason:'PAUSED'});if(facebookBumpDateValue(settings.nextJobAllowedAt)>now.getTime())return output({ok:true,job:null,reason:'DELAY'});
-  const queue=facebookBumpRows(SHEETS.facebookBumpQueue);queue.filter(job=>String(job.status)==='PROCESSING'&&String(job.source).indexOf('REAL_WORKER:')===0&&now.getTime()-facebookBumpDateValue(job.updatedAt)>300000).forEach(job=>{job.status='PENDING';job.error='WORKER_LEASE_EXPIRED';job.updatedAt=now;facebookBumpWriteRow(SHEETS.facebookBumpQueue,job);});
+  const queue=facebookBumpRows(SHEETS.facebookBumpQueue);queue.filter(job=>String(job.status)==='PROCESSING'&&String(job.source).indexOf('REAL_WORKER:')===0&&now.getTime()-facebookBumpDateValue(job.updatedAt)>300000).forEach(job=>{job.status='FAILED';job.error='WORKER_LEASE_EXPIRED_NEEDS_REVIEW';job.updatedAt=now;facebookBumpWriteRow(SHEETS.facebookBumpQueue,job);facebookBumpAppendHistory({targetPostId:job.targetPostId,postName:job.postName,postUrl:job.postUrl,action:'RECOVER_STALE_REAL_JOB',message:job.message,result:'FAILED',cleanupResult:'NOT_RUN',error:job.error,jobId:job.jobId});});
   const job=facebookBumpSelectNextPending(queue,now);if(!job)return output({ok:true,job:null,reason:'EMPTY'});
   const post=facebookBumpRows(SHEETS.facebookBumpPosts).find(item=>String(item.id)===String(job.targetPostId)&&!item.deletedAt&&facebookBumpBoolean(item.enabled));if(!post){job.status='CANCELLED';job.error='POST_NOT_AVAILABLE';job.updatedAt=now;facebookBumpWriteRow(SHEETS.facebookBumpQueue,job);return output({ok:true,job:null,reason:'POST_NOT_AVAILABLE'});}
   job.status='PROCESSING';job.attempts=number(job.attempts)+1;job.error='';job.updatedAt=now;job.source='REAL_WORKER:'+actor.userId;facebookBumpWriteRow(SHEETS.facebookBumpQueue,job);facebookBumpSetSetting('facebookBumpNextJobAllowedAt',new Date(now.getTime()+settings.delaySeconds*1000),'Next Facebook Bump job gate');

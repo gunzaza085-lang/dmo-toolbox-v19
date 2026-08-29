@@ -9,6 +9,7 @@ const moduleSource=fs.readFileSync(path.join(root,'FacebookBumpModule.gs'),'utf8
 const frontend=fs.readFileSync(path.join(root,'app.js'),'utf8');
 const css=fs.readFileSync(path.join(root,'app.css'),'utf8');
 const worker=fs.readFileSync(path.join(root,'facebook-worker','worker.js'),'utf8');
+const recoverySource=fs.readFileSync(path.join(root,'facebook-worker','recovery.js'),'utf8');
 const tests=[];
 function test(name,fn){try{fn();tests.push({name,status:'PASS'});}catch(error){tests.push({name,status:'FAIL',error:error.stack||error.message});}}
 function assert(value,message){if(!value)throw Error(message);}
@@ -125,10 +126,20 @@ test('Facebook action UX gives immediate feedback and blocks duplicate clicks',(
 
 test('Worker uses one persistent browser and can focus an existing window',()=>{
   assert(worker.includes("launchPersistentContext(PROFILE_DIR"),'persistent browser profile missing');
-  assert(worker.includes('if (!context) context = await chromium.launchPersistentContext'),'worker can open duplicate browser contexts');
+  assert(worker.includes('if (!browserLaunchPromise)')&&worker.includes('await browserLaunchPromise'),'worker can open duplicate browser contexts');
   assert(worker.includes('await page.bringToFront()'),'worker does not focus the existing browser');
   assert(worker.includes("worker: 'ONLINE'")&&worker.includes("browser: browserRunning ? 'RUNNING' : 'STOPPED'"),'worker/browser status missing');
   assert(worker.includes('BACKEND_TIMEOUT_MS')&&worker.includes('AbortController'),'stalled backend request recovery missing');
+  assert(worker.includes('loopbackOrigin')&&worker.includes('127\\.0\\.0\\.1|localhost'),'TEST localhost ports are blocked by CORS');
+});
+test('Worker crash recovery is bounded and stale real jobs fail closed',()=>{
+  assert(worker.includes('browserLaunchPromise')&&worker.includes('RecoveryBackoff'),'bounded browser recovery missing');
+  assert(worker.includes("if (connection === 'INVALID')")&&worker.includes('openFacebookPage(FACEBOOK_HOME)'),'recovered browser stays on an invalid blank page');
+  assert(worker.includes('maintainBrowser')&&worker.includes('browserAutoRecoveryEnabled'),'browser health recovery depends on an open BackOffice page');
+  assert(recoverySource.includes('BROWSER_CLOSED_NEEDS_REVIEW'),'browser crash is not fail-closed');
+  assert(moduleSource.includes('WORKER_LEASE_EXPIRED_NEEDS_REVIEW'),'stale real job can be retried blindly');
+  assert(moduleSource.includes("if(/NEEDS_REVIEW/.test(String(job.error||'')))"),'unsafe retry guard missing');
+  assert(frontend.includes('recoverFacebookWorkerPair'),'BackOffice pair recovery missing');
 });
 
 test('Scheduler can be opened or closed with server-side permission checks',()=>{

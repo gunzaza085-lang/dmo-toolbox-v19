@@ -2,6 +2,7 @@
 
 const assert = require('assert');
 const { COMMENT_LABELS, classifyFacebookUrl, selectNewVerifiedReference, stableReference } = require('./facebook-page');
+const { RecoveryBackoff, isBrowserClosedError, needsReviewError } = require('./recovery');
 
 assert.equal(classifyFacebookUrl('https://www.facebook.com/'), 'CONNECTED');
 assert.equal(classifyFacebookUrl('https://www.facebook.com/login/'), 'LOGIN_REQUIRED');
@@ -20,4 +21,17 @@ assert.equal(selectNewVerifiedReference([oldComment], [oldComment, newComment]),
 assert.equal(selectNewVerifiedReference([oldComment], [permalinkComment]), permalinkComment);
 assert.equal(selectNewVerifiedReference([oldComment], [oldComment]), '');
 assert.equal(selectNewVerifiedReference([], [temporaryComment]), '');
-console.log('Facebook worker tests: 13/13 PASS');
+const backoff = new RecoveryBackoff({ baseDelayMs: 100, maxDelayMs: 400 });
+assert.equal(backoff.canAttempt(0), true);
+assert.equal(backoff.failure(1000), 100);
+assert.equal(backoff.canAttempt(1099), false);
+assert.equal(backoff.canAttempt(1100), true);
+assert.equal(backoff.failure(1100), 200);
+assert.equal(backoff.failure(1300), 400);
+assert.equal(backoff.failure(1700), 400);
+backoff.success();
+assert.equal(backoff.failures, 0);
+assert.equal(backoff.canAttempt(0), true);
+assert.equal(isBrowserClosedError(Error('browserContext.newPage: Target page, context or browser has been closed')), true);
+assert.equal(needsReviewError(Error('Target closed')), 'BROWSER_CLOSED_NEEDS_REVIEW');
+console.log('Facebook worker tests: 26/26 PASS');

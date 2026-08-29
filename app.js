@@ -579,6 +579,15 @@ function facebookBumpDate(value) {
 const FACEBOOK_WORKER_URL='http://127.0.0.1:17821';
 async function facebookWorkerRequest(path,payload){const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),60000);try{const response=await fetch(FACEBOOK_WORKER_URL+path,{method:payload?'POST':'GET',headers:{'Content-Type':'application/json'},body:payload?JSON.stringify(payload):undefined,signal:controller.signal});const data=await response.json();if(!data.ok)throw Error(data.error||'LOCAL_WORKER_ERROR');state.facebookBump.connection=data;return data;}catch(error){if(error?.name==='AbortError')throw Error('LOCAL_WORKER_TIMEOUT');throw error;}finally{clearTimeout(timeout);}}
 async function refreshFacebookWorker(){try{return await facebookWorkerRequest('/status');}catch(error){state.facebookBump.connection={worker:'OFFLINE',browser:'STOPPED',connection:'OFFLINE',paired:false,running:false,lastError:'ไม่พบ Local Facebook Worker กรุณาเปิด Worker แล้วลองใหม่'};return state.facebookBump.connection;}}
+async function recoverFacebookWorkerPair(){
+  const current=state.facebookBump.connection||{};
+  if(current.worker!=='ONLINE'||current.paired||!state.adminToken)return current;
+  try{
+    const checked=await facebookWorkerRequest('/connect',{});
+    if(checked.connection!=='CONNECTED')return checked;
+    return await facebookWorkerRequest('/pair',{apiUrl:cfg.sheetsUrl,token:state.adminToken});
+  }catch(error){return state.facebookBump.connection;}
+}
 function facebookPending(key){return state.facebookBump.pending===key;}
 function facebookDisabled(){return state.facebookBump.pending?'disabled':'';}
 function facebookFriendlyError(error){const code=String(error?.message||error||'');if(/FAILED_TO_FETCH|NETWORK|OFFLINE/i.test(code))return'ไม่พบ Local Facebook Worker กรุณาเปิด Worker แล้วลองใหม่';if(/LOCAL_WORKER_TIMEOUT/i.test(code))return'Local Facebook Worker ไม่ตอบกลับภายในเวลาที่กำหนด กรุณาตรวจ Worker แล้วลองใหม่';if(/BACKEND_TIMEOUT/i.test(code))return'เชื่อมต่อ BackOffice ใช้เวลานานเกินไป ระบบจะลองใหม่อัตโนมัติ';if(/LOGIN_REQUIRED/i.test(code))return'กรุณา Login Facebook ในหน้าต่าง Worker';return code||'ดำเนินการไม่สำเร็จ กรุณาลองใหม่';}
@@ -1202,6 +1211,7 @@ async function loadFacebookBumpAdminData() {
   try {
     const [backend]=await Promise.all([apiPost({action:'getFacebookBumpAdminData',token:state.adminToken}),refreshFacebookWorker()]);
     state.adminData.facebookBump = backend.facebookBump || null;
+    await recoverFacebookWorkerPair();
   } catch (error) {
     state.facebookBump.loadError=error.message||'โหลด Facebook Module ไม่สำเร็จ';toast(state.facebookBump.loadError);
   } finally {
