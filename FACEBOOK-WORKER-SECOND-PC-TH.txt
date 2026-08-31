@@ -1,6 +1,6 @@
 GUN SHOP DMO — Facebook Worker (เครื่องที่สอง)
 
-1. แตก ZIP ไว้ในโฟลเดอร์ที่เขียนไฟล์ได้ เช่น Documents\GUN-SHOP-DMO-Worker
+1. แตก ZIP ไว้ในโฟลเดอร์ที่เขียนไฟล์ได้ เช่น Documents\GUN-SHOP-DMO-Worker (path มีเว้นวรรคได้)
 2. ติดตั้ง Google Chrome และ Node.js 20 ขึ้นไป
 3. ดับเบิลคลิก SETUP-FACEBOOK-WORKER.cmd หนึ่งครั้ง
 4. ดับเบิลคลิก START-FACEBOOK-WORKER.cmd และเปิดหน้าหลังร้าน Production
@@ -9,6 +9,6 @@ GUN SHOP DMO — Facebook Worker (เครื่องที่สอง)
 7. เริ่มด้วย DRY RUN, Scheduler OFF และ Pause All ก่อนทดสอบงานจริง
 
 ข้อมูลสำคัญ:
-- Browser profile จะเก็บใน LocalAppData ของ Windows เครื่องนั้น ไม่อยู่ใน source/ZIP
+- Browser profile จะเก็บที่ %LOCALAPPDATA%\GUN-SHOP-DMO\FacebookWorkerProfile ของ Windows เครื่องนั้นเท่านั้น ไม่อยู่ใน source/ZIP
 - ห้ามคัดลอก password, cookie หรือ browser profile ขึ้น GitHub/Google Sheet
 - ถ้าขึ้น LOGIN_REQUIRED/CHECKPOINT ให้ทำ Login/2FA/CAPTCHA ใน Chrome Worker เท่านั้น

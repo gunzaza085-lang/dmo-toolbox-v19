@@ -1,7 +1,5 @@
 'use strict';
 
-const crypto = require('crypto');
-
 const FACEBOOK_HOME = 'https://www.facebook.com/';
 const LOGIN_PATHS = ['/login', '/checkpoint', '/recover'];
 const COMMENT_LABELS = [
@@ -21,10 +19,6 @@ function classifyFacebookUrl(value) {
   return 'CONNECTED';
 }
 
-function stableReference(value) {
-  return `UNVERIFIED-${crypto.createHash('sha256').update(String(value || '')).digest('hex').slice(0, 20)}`;
-}
-
 function selectNewVerifiedReference(beforeReferences, afterReferences) {
   const before = new Set((beforeReferences || []).filter(Boolean));
   const fresh = (afterReferences || []).filter((reference) => reference && !before.has(reference));
@@ -35,6 +29,11 @@ function selectNewVerifiedReference(beforeReferences, afterReferences) {
       return commentId && !commentId.startsWith('client:') && /\/(?:groups\/[^/]+\/(?:posts|permalink)|posts)\//i.test(url.pathname);
     } catch { return false; }
   }) || '';
+}
+
+function requireVerifiedCommentReference(reference) {
+  if (!reference) throw Error('COMMENT_REFERENCE_UNVERIFIED_NEEDS_REVIEW');
+  return reference;
 }
 
 class FacebookPageAdapter {
@@ -122,7 +121,7 @@ class FacebookPageAdapter {
           href = selectNewVerifiedReference(beforeReferences, [this.page.url(), ...afterReferences]);
           if (!href) await this.page.waitForTimeout(500);
         }
-        return { ok: true, externalCommentId: href || stableReference(`${this.page.url()}|${text}|${Date.now()}`), verifiedReference: Boolean(href) };
+        return { ok: true, externalCommentId: requireVerifiedCommentReference(href), verifiedReference: true };
       }
     }
     throw Error('COMMENT_SUBMIT_TIMEOUT');
@@ -159,4 +158,4 @@ class FacebookPageAdapter {
   }
 }
 
-module.exports = { FACEBOOK_HOME, COMMENT_LABELS, FacebookPageAdapter, classifyFacebookUrl, selectNewVerifiedReference, stableReference };
+module.exports = { FACEBOOK_HOME, COMMENT_LABELS, FacebookPageAdapter, classifyFacebookUrl, requireVerifiedCommentReference, selectNewVerifiedReference };
