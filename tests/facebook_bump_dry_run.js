@@ -139,6 +139,7 @@ test('Worker uses one persistent browser and can focus an existing window',()=>{
   assert(frontend.includes('facebookPairViaLocalTab')&&frontend.includes("event.data?.type!=='DMO_FACEBOOK_PAIR_RESULT'"),'BackOffice local pair bridge is missing');
   assert(worker.includes("req.url === '/pair-browser'")&&worker.includes('pairBridgeResponse'),'worker local pair bridge is missing');
   assert(worker.includes("if(current.connection!=='CONNECTED')current=await openFacebookPage"),'pair bridge needlessly reloads an already connected Facebook session');
+  assert(worker.includes("req.url === '/pair-browser' && origin === 'null'")&&worker.includes('!localPairNavigation'),'null origin is not narrowly limited to the local pair form');
 });
 test('Worker crash recovery is bounded and stale real jobs fail closed',()=>{
   assert(worker.includes('browserLaunchPromise')&&worker.includes('RecoveryBackoff'),'bounded browser recovery missing');

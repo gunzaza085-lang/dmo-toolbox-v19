@@ -204,7 +204,8 @@ function schedule() {
 function cors(req, res) {
   const origin = req.headers.origin || '';
   const loopbackOrigin = /^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/.test(origin);
-  if (origin && !ALLOWED_ORIGINS.has(origin) && !loopbackOrigin) return false;
+  const localPairNavigation = req.method === 'POST' && req.url === '/pair-browser' && origin === 'null';
+  if (origin && !ALLOWED_ORIGINS.has(origin) && !loopbackOrigin && !localPairNavigation) return false;
   if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
   if (req.headers['access-control-request-private-network'] === 'true') res.setHeader('Access-Control-Allow-Private-Network', 'true');
   res.setHeader('Vary', 'Origin');
