@@ -577,7 +577,7 @@ function facebookBumpDate(value) {
 }
 
 const FACEBOOK_WORKER_URL='http://127.0.0.1:17821';
-async function facebookWorkerRequest(path,payload){const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),60000);try{const response=await fetch(FACEBOOK_WORKER_URL+path,{method:payload?'POST':'GET',headers:{'Content-Type':'application/json'},body:payload?JSON.stringify(payload):undefined,signal:controller.signal});const data=await response.json();if(!data.ok)throw Error(data.error||'LOCAL_WORKER_ERROR');state.facebookBump.connection=data;return data;}catch(error){if(error?.name==='AbortError')throw Error('LOCAL_WORKER_TIMEOUT');throw error;}finally{clearTimeout(timeout);}}
+async function facebookWorkerRequest(path,payload){const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),60000);try{const response=await fetch(FACEBOOK_WORKER_URL+path,{method:payload?'POST':'GET',headers:{'Content-Type':'application/json'},body:payload?JSON.stringify(payload):undefined,signal:controller.signal,targetAddressSpace:'local'});const data=await response.json();if(!data.ok)throw Error(data.error||'LOCAL_WORKER_ERROR');state.facebookBump.connection=data;return data;}catch(error){if(error?.name==='AbortError')throw Error('LOCAL_WORKER_TIMEOUT');throw error;}finally{clearTimeout(timeout);}}
 async function refreshFacebookWorker(){try{return await facebookWorkerRequest('/status');}catch(error){state.facebookBump.connection={worker:'OFFLINE',browser:'STOPPED',connection:'OFFLINE',paired:false,running:false,lastError:'ไม่พบ Local Facebook Worker กรุณาเปิด Worker แล้วลองใหม่'};return state.facebookBump.connection;}}
 async function recoverFacebookWorkerPair(){
   const current=state.facebookBump.connection||{};

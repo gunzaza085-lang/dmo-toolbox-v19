@@ -131,6 +131,8 @@ test('Worker uses one persistent browser and can focus an existing window',()=>{
   assert(worker.includes("worker: 'ONLINE'")&&worker.includes("browser: browserRunning ? 'RUNNING' : 'STOPPED'"),'worker/browser status missing');
   assert(worker.includes('BACKEND_TIMEOUT_MS')&&worker.includes('AbortController'),'stalled backend request recovery missing');
   assert(worker.includes('loopbackOrigin')&&worker.includes('127\\.0\\.0\\.1|localhost'),'TEST localhost ports are blocked by CORS');
+  assert(frontend.includes("targetAddressSpace:'local'"),'Production fetch does not request local-network access');
+  assert(worker.includes("Access-Control-Allow-Private-Network', 'true'"),'worker does not approve private-network preflight');
 });
 test('Worker crash recovery is bounded and stale real jobs fail closed',()=>{
   assert(worker.includes('browserLaunchPromise')&&worker.includes('RecoveryBackoff'),'bounded browser recovery missing');

@@ -206,6 +206,7 @@ function cors(req, res) {
   const loopbackOrigin = /^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/.test(origin);
   if (origin && !ALLOWED_ORIGINS.has(origin) && !loopbackOrigin) return false;
   if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+  if (req.headers['access-control-request-private-network'] === 'true') res.setHeader('Access-Control-Allow-Private-Network', 'true');
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
