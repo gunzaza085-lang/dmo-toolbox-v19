@@ -135,7 +135,9 @@ test('Worker uses one persistent browser and can focus an existing window',()=>{
   assert(worker.includes('loopbackOrigin')&&worker.includes('127\\.0\\.0\\.1|localhost'),'TEST localhost ports are blocked by CORS');
   assert(frontend.includes("targetAddressSpace:'local'"),'Production fetch does not request local-network access');
   assert(worker.includes("Access-Control-Allow-Private-Network', 'true'"),'worker does not approve private-network preflight');
-  assert(index.includes('app.js?v=20260901-v20.2-local-pair-1')&&serviceWorker.includes('app.js?v=20260901-v20.2-local-pair-1'),'PWA cache does not refresh the pairing fix');
+  assert(index.includes('app.js?v=20260901-v20.2-local-pair-2')&&serviceWorker.includes('app.js?v=20260901-v20.2-local-pair-2'),'PWA cache does not refresh the pairing fix');
+  assert(frontend.includes('facebookPairViaLocalTab')&&frontend.includes("event.data?.type!=='DMO_FACEBOOK_PAIR_RESULT'"),'BackOffice local pair bridge is missing');
+  assert(worker.includes("req.url === '/pair-browser'")&&worker.includes('pairBridgeResponse'),'worker local pair bridge is missing');
 });
 test('Worker crash recovery is bounded and stale real jobs fail closed',()=>{
   assert(worker.includes('browserLaunchPromise')&&worker.includes('RecoveryBackoff'),'bounded browser recovery missing');

@@ -214,7 +214,13 @@ function cors(req, res) {
 }
 
 function readBody(req) {
-  return new Promise((resolve, reject) => { let body = ''; req.on('data', (chunk) => { body += chunk; if (body.length > 200000) reject(Error('REQUEST_TOO_LARGE')); }); req.on('end', () => { try { resolve(body ? JSON.parse(body) : {}); } catch { reject(Error('INVALID_JSON')); } }); req.on('error', reject); });
+  return new Promise((resolve, reject) => { let body = ''; req.on('data', (chunk) => { body += chunk; if (body.length > 200000) reject(Error('REQUEST_TOO_LARGE')); }); req.on('end', () => { try { const contentType=String(req.headers['content-type']||'').toLowerCase();resolve(!body?{}:contentType.startsWith('application/x-www-form-urlencoded')?Object.fromEntries(new URLSearchParams(body)):JSON.parse(body)); } catch { reject(Error('INVALID_BODY')); } }); req.on('error', reject); });
+}
+
+function pairBridgeResponse(res, status) {
+  const payload=JSON.stringify({ type: 'DMO_FACEBOOK_PAIR_RESULT', status }).replace(/</g,'\\u003c');
+  res.setHeader('Content-Type','text/html;charset=utf-8');
+  return res.end(`<!doctype html><meta charset="utf-8"><title>DMO Facebook Pair</title><p>Pairing complete. This window will close automatically.</p><script>if(window.opener)window.opener.postMessage(${payload},'https://gunzaza085-lang.github.io');setTimeout(()=>window.close(),400);<\/script>`);
 }
 
 const server = http.createServer(async (req, res) => {
@@ -227,6 +233,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/connect') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(FACEBOOK_HOME))); }
     if (req.method === 'POST' && req.url === '/test') { browserAutoRecoveryEnabled = true; const adapter = await ensureBrowser({ force: true }); const connection = await refreshAccountIdentity(adapter); if (connection === 'CONNECTED') lastError = ''; return res.end(JSON.stringify(publicStatus(connection))); }
     if (req.method === 'POST' && req.url === '/open') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(body.url || FACEBOOK_HOME))); }
+    if (req.method === 'POST' && req.url === '/pair-browser') { if (!/^https:\/\/script\.google\.com\/macros\/s\//.test(String(body.apiUrl || '')) || !body.token) throw Error('INVALID_PAIRING'); browserAutoRecoveryEnabled = true; const opened=await openFacebookPage(FACEBOOK_HOME); if(opened.connection==='CONNECTED'){paired={apiUrl:String(body.apiUrl),token:String(body.token)};schedule();} return pairBridgeResponse(res,await connectionStatus()); }
     if (req.method === 'POST' && req.url === '/pair') { if (!/^https:\/\/script\.google\.com\/macros\/s\//.test(String(body.apiUrl || '')) || !body.token) throw Error('INVALID_PAIRING'); paired = { apiUrl: String(body.apiUrl), token: String(body.token) }; schedule(); return res.end(JSON.stringify(await connectionStatus())); }
     if (req.method === 'POST' && req.url === '/disconnect') { paired = null; running = false; clearInterval(timer); timer = null; browserAutoRecoveryEnabled = false; intentionalBrowserClose = true; if (context) await context.close(); context = null; page = null; recoveryBackoff.success(); return res.end(JSON.stringify(publicStatus('DISCONNECTED'))); }
     res.writeHead(404); return res.end(JSON.stringify({ ok: false, error: 'NOT_FOUND' }));
