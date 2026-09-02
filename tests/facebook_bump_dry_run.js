@@ -129,7 +129,9 @@ test('Facebook action UX gives immediate feedback and blocks duplicate clicks',(
 test('Worker uses one persistent browser and can focus an existing window',()=>{
   assert(worker.includes("launchPersistentContext(PROFILE_DIR"),'persistent browser profile missing');
   assert(worker.includes('if (!browserLaunchPromise)')&&worker.includes('await browserLaunchPromise'),'worker can open duplicate browser contexts');
-  assert(worker.includes('await page.bringToFront()'),'worker does not focus the existing browser');
+  assert(worker.includes("args: ['--start-minimized']"),'worker browser does not start minimized');
+  assert(worker.includes('if (focus) await page.bringToFront()'),'background polling can steal focus from other apps');
+  assert(worker.includes("openFacebookPage(FACEBOOK_HOME,{focus:true})")&&worker.includes("ensureBrowser({ force: true, focus: true })"),'explicit browser actions cannot focus the worker window');
   assert(worker.includes("worker: 'ONLINE'")&&worker.includes("browser: browserRunning ? 'RUNNING' : 'STOPPED'"),'worker/browser status missing');
   assert(worker.includes('BACKEND_TIMEOUT_MS')&&worker.includes('AbortController'),'stalled backend request recovery missing');
   assert(worker.includes('loopbackOrigin')&&worker.includes('127\\.0\\.0\\.1|localhost'),'TEST localhost ports are blocked by CORS');

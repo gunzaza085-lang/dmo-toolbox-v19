@@ -53,7 +53,7 @@ async function invalidateBrowser(error) {
 }
 
 async function launchBrowser() {
-  const launched = await chromium.launchPersistentContext(PROFILE_DIR, { channel: 'chrome', headless: false, viewport: null, args: ['--start-maximized'] });
+  const launched = await chromium.launchPersistentContext(PROFILE_DIR, { channel: 'chrome', headless: false, viewport: null, args: ['--start-minimized'] });
   intentionalBrowserClose = false;
   launched.on('close', () => {
     if (context === launched) { context = null; page = null; }
@@ -66,6 +66,7 @@ async function launchBrowser() {
 
 async function ensureBrowser(options = {}) {
   const force = Boolean(options.force);
+  const focus = Boolean(options.focus);
   try {
     if (context) {
       const pages = context.pages();
@@ -86,18 +87,21 @@ async function ensureBrowser(options = {}) {
     if (isBrowserClosedError(error)) { await invalidateBrowser(error); recoveryBackoff.failure(); }
     throw error;
   }
-  try {
-    const cdp = await context.newCDPSession(page);
-    const { windowId } = await cdp.send('Browser.getWindowForTarget');
-    await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal', left: 80, top: 60, width: 1280, height: 820 } });
-    await cdp.detach();
-  } catch {}
-  await page.bringToFront();
+  if (focus) {
+    try {
+      const cdp = await context.newCDPSession(page);
+      const { windowId } = await cdp.send('Browser.getWindowForTarget');
+      await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal', left: 80, top: 60, width: 1280, height: 820 } });
+      await cdp.detach();
+    } catch {}
+    await page.bringToFront();
+  }
   return new FacebookPageAdapter(page);
 }
 
-async function openFacebookPage(targetUrl) {
-  const adapter = await ensureBrowser({ force: true });
+async function openFacebookPage(targetUrl, options = {}) {
+  const focus = Boolean(options.focus);
+  const adapter = await ensureBrowser({ force: true, focus });
   try {
     await page.goto(targetUrl || FACEBOOK_HOME, { waitUntil: 'domcontentloaded', timeout: 45000 });
   } catch (error) {
@@ -105,7 +109,7 @@ async function openFacebookPage(targetUrl) {
     if (!aborted || classifyFacebookUrl(page.url()) === 'INVALID') throw error;
     await page.waitForTimeout(1000);
   }
-  await page.bringToFront();
+  if (focus) await page.bringToFront();
   const connection = await adapter.connectionState();
   if (connection === 'CONNECTED') lastError = '';
   return publicStatus(connection);
@@ -231,10 +235,10 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && req.url === '/status') return res.end(JSON.stringify(await connectionStatus()));
     const body = await readBody(req);
-    if (req.method === 'POST' && req.url === '/connect') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(FACEBOOK_HOME))); }
-    if (req.method === 'POST' && req.url === '/test') { browserAutoRecoveryEnabled = true; const adapter = await ensureBrowser({ force: true }); const connection = await refreshAccountIdentity(adapter); if (connection === 'CONNECTED') lastError = ''; return res.end(JSON.stringify(publicStatus(connection))); }
-    if (req.method === 'POST' && req.url === '/open') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(body.url || FACEBOOK_HOME))); }
-    if (req.method === 'POST' && req.url === '/pair-browser') { if (!/^https:\/\/script\.google\.com\/macros\/s\//.test(String(body.apiUrl || '')) || !body.token) throw Error('INVALID_PAIRING'); browserAutoRecoveryEnabled = true; let current=await connectionStatus();if(current.connection!=='CONNECTED')current=await openFacebookPage(FACEBOOK_HOME);if(current.connection==='CONNECTED'){paired={apiUrl:String(body.apiUrl),token:String(body.token)};schedule();} return pairBridgeResponse(res,await connectionStatus()); }
+    if (req.method === 'POST' && req.url === '/connect') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(FACEBOOK_HOME,{focus:true}))); }
+    if (req.method === 'POST' && req.url === '/test') { browserAutoRecoveryEnabled = true; const adapter = await ensureBrowser({ force: true, focus: true }); const connection = await refreshAccountIdentity(adapter); if (connection === 'CONNECTED') lastError = ''; return res.end(JSON.stringify(publicStatus(connection))); }
+    if (req.method === 'POST' && req.url === '/open') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(body.url || FACEBOOK_HOME,{focus:true}))); }
+    if (req.method === 'POST' && req.url === '/pair-browser') { if (!/^https:\/\/script\.google\.com\/macros\/s\//.test(String(body.apiUrl || '')) || !body.token) throw Error('INVALID_PAIRING'); browserAutoRecoveryEnabled = true; let current=await connectionStatus();if(current.connection!=='CONNECTED')current=await openFacebookPage(FACEBOOK_HOME,{focus:true});if(current.connection==='CONNECTED'){paired={apiUrl:String(body.apiUrl),token:String(body.token)};schedule();} return pairBridgeResponse(res,await connectionStatus()); }
     if (req.method === 'POST' && req.url === '/pair') { if (!/^https:\/\/script\.google\.com\/macros\/s\//.test(String(body.apiUrl || '')) || !body.token) throw Error('INVALID_PAIRING'); paired = { apiUrl: String(body.apiUrl), token: String(body.token) }; schedule(); return res.end(JSON.stringify(await connectionStatus())); }
     if (req.method === 'POST' && req.url === '/disconnect') { paired = null; running = false; clearInterval(timer); timer = null; browserAutoRecoveryEnabled = false; intentionalBrowserClose = true; if (context) await context.close(); context = null; page = null; recoveryBackoff.success(); return res.end(JSON.stringify(publicStatus('DISCONNECTED'))); }
     res.writeHead(404); return res.end(JSON.stringify({ ok: false, error: 'NOT_FOUND' }));
