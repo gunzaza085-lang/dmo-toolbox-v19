@@ -75,14 +75,22 @@ class FacebookPageAdapter {
     await this.page.waitForTimeout(1200);
   }
 
-  async findCommentInput() {
-    const candidates = this.page.locator('div[contenteditable="true"][role="textbox"], textarea');
-    const count = await candidates.count();
-    for (let index = 0; index < count; index += 1) {
-      const candidate = candidates.nth(index);
-      const label = `${await candidate.getAttribute('aria-label') || ''} ${await candidate.getAttribute('placeholder') || ''}`;
-      if (COMMENT_LABELS.some((pattern) => pattern.test(label)) && await candidate.isVisible()) return candidate;
-    }
+  async findCommentInput(timeoutMs = 20000) {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      const candidates = this.page.locator('div[contenteditable="true"][role="textbox"], div[contenteditable="true"][data-lexical-editor="true"], textarea');
+      const count = await candidates.count();
+      const visible = [];
+      for (let index = 0; index < count; index += 1) {
+        const candidate = candidates.nth(index);
+        if (!await candidate.isVisible()) continue;
+        visible.push(candidate);
+        const label = `${await candidate.getAttribute('aria-label') || ''} ${await candidate.getAttribute('placeholder') || ''}`;
+        if (COMMENT_LABELS.some((pattern) => pattern.test(label))) return candidate;
+      }
+      if (visible.length === 1 && /\/(?:groups\/[^/]+\/(?:posts|permalink)|posts)\//i.test(new URL(this.page.url()).pathname)) return visible[0];
+      if (Date.now() < deadline) await this.page.waitForTimeout(500);
+    } while (Date.now() < deadline);
     throw Error('COMMENT_INPUT_NOT_FOUND');
   }
 
