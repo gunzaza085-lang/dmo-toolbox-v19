@@ -22,6 +22,8 @@ let page = null;
 let paired = null;
 let running = false;
 let lastError = '';
+let lastClaimReason = '';
+let lastClaimAt = '';
 let timer = null;
 let healthTimer = null;
 let account = { name: '', identifier: '', checkedAt: '' };
@@ -35,7 +37,7 @@ const recoveryBackoff = new RecoveryBackoff({
 
 function publicStatus(connection = 'DISCONNECTED') {
   const browserRunning = Boolean(context && page && !page.isClosed());
-  return { ok: true, worker: 'ONLINE', browser: browserRunning ? 'RUNNING' : 'STOPPED', connection, paired: Boolean(paired), running, lastError, workerPid: process.pid, browserProfile: path.basename(PROFILE_DIR), recovery: { failures: recoveryBackoff.failures, retryInMs: recoveryBackoff.remainingMs() }, account: { ...account }, lastChecked: new Date().toISOString() };
+  return { ok: true, worker: 'ONLINE', browser: browserRunning ? 'RUNNING' : 'STOPPED', connection, paired: Boolean(paired), running, lastError, lastClaimReason, lastClaimAt, workerPid: process.pid, browserProfile: path.basename(PROFILE_DIR), recovery: { failures: recoveryBackoff.failures, retryInMs: recoveryBackoff.remainingMs() }, account: { ...account }, lastChecked: new Date().toISOString() };
 }
 
 async function refreshAccountIdentity(adapter) {
@@ -160,7 +162,16 @@ async function processOnce() {
   if (connection !== 'CONNECTED') { lastError = connection; return; }
   running = true;
   try {
-    const claim = await apiPost({ action: 'claimFacebookBumpJob' });
+    let claim;
+    try {
+      claim = await apiPost({ action: 'claimFacebookBumpJob' });
+      lastClaimReason = claim.job ? 'CLAIMED' : String(claim.reason || 'NO_JOB');
+    } catch (error) {
+      lastClaimReason = `ERROR:${String(error && error.message || error).slice(0, 200)}`;
+      throw error;
+    } finally {
+      lastClaimAt = new Date().toISOString();
+    }
     if (!claim.job) return;
     const { job, previousOwnedComment, cleanupOld } = claim;
     try {
