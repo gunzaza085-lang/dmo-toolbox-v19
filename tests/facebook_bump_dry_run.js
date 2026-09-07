@@ -10,6 +10,8 @@ const frontend=fs.readFileSync(path.join(root,'app.js'),'utf8');
 const css=fs.readFileSync(path.join(root,'app.css'),'utf8');
 const worker=fs.readFileSync(path.join(root,'facebook-worker','worker.js'),'utf8');
 const recoverySource=fs.readFileSync(path.join(root,'facebook-worker','recovery.js'),'utf8');
+const index=fs.readFileSync(path.join(root,'index.html'),'utf8');
+const serviceWorker=fs.readFileSync(path.join(root,'sw.js'),'utf8');
 const tests=[];
 function test(name,fn){try{fn();tests.push({name,status:'PASS'});}catch(error){tests.push({name,status:'FAIL',error:error.stack||error.message});}}
 function assert(value,message){if(!value)throw Error(message);}
@@ -127,10 +129,20 @@ test('Facebook action UX gives immediate feedback and blocks duplicate clicks',(
 test('Worker uses one persistent browser and can focus an existing window',()=>{
   assert(worker.includes("launchPersistentContext(PROFILE_DIR"),'persistent browser profile missing');
   assert(worker.includes('if (!browserLaunchPromise)')&&worker.includes('await browserLaunchPromise'),'worker can open duplicate browser contexts');
-  assert(worker.includes('await page.bringToFront()'),'worker does not focus the existing browser');
+  assert(worker.includes("args: ['--start-minimized']"),'worker browser does not start minimized');
+  assert(worker.includes('if (focus) await page.bringToFront()'),'background polling can steal focus from other apps');
+  assert(worker.includes("openFacebookPage(FACEBOOK_HOME,{focus:true})")&&worker.includes("ensureBrowser({ force: true, focus: true })"),'explicit browser actions cannot focus the worker window');
   assert(worker.includes("worker: 'ONLINE'")&&worker.includes("browser: browserRunning ? 'RUNNING' : 'STOPPED'"),'worker/browser status missing');
   assert(worker.includes('BACKEND_TIMEOUT_MS')&&worker.includes('AbortController'),'stalled backend request recovery missing');
   assert(worker.includes('loopbackOrigin')&&worker.includes('127\\.0\\.0\\.1|localhost'),'TEST localhost ports are blocked by CORS');
+  assert(frontend.includes("targetAddressSpace:'local'"),'Production fetch does not request local-network access');
+  assert(worker.includes("Access-Control-Allow-Private-Network', 'true'"),'worker does not approve private-network preflight');
+  assert(index.includes('app.js?v=20260907-v20.2-performance-1')&&serviceWorker.includes('app.js?v=20260907-v20.2-performance-1'),'PWA cache does not include the latest Facebook recovery and performance build');
+  assert(frontend.includes('id="fbPauseAllBtn" ${state.facebookBump.pending?\'disabled\':\'\'}')&&frontend.includes('id="fbResumeAllBtn" ${state.facebookBump.pending?\'disabled\':\'\'}'),'stale admin state can lock out pause/resume recovery');
+  assert(frontend.includes('facebookPairViaLocalTab')&&frontend.includes("event.data?.type!=='DMO_FACEBOOK_PAIR_RESULT'"),'BackOffice local pair bridge is missing');
+  assert(worker.includes("req.url === '/pair-browser'")&&worker.includes('pairBridgeResponse'),'worker local pair bridge is missing');
+  assert(worker.includes("if(current.connection!=='CONNECTED')current=await openFacebookPage"),'pair bridge needlessly reloads an already connected Facebook session');
+  assert(worker.includes("req.url === '/pair-browser' && origin === 'null'")&&worker.includes('!localPairNavigation'),'null origin is not narrowly limited to the local pair form');
 });
 test('Worker crash recovery is bounded and stale real jobs fail closed',()=>{
   assert(worker.includes('browserLaunchPromise')&&worker.includes('RecoveryBackoff'),'bounded browser recovery missing');

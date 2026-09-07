@@ -18,6 +18,8 @@ let page = null;
 let paired = null;
 let running = false;
 let lastError = '';
+let lastClaimReason = '';
+let lastClaimAt = '';
 let timer = null;
 let healthTimer = null;
 let account = { name: '', identifier: '', checkedAt: '' };
@@ -31,7 +33,7 @@ const recoveryBackoff = new RecoveryBackoff({
 
 function publicStatus(connection = 'DISCONNECTED') {
   const browserRunning = Boolean(context && page && !page.isClosed());
-  return { ok: true, worker: 'ONLINE', browser: browserRunning ? 'RUNNING' : 'STOPPED', connection, paired: Boolean(paired), running, lastError, workerPid: process.pid, browserProfile: path.basename(PROFILE_DIR), recovery: { failures: recoveryBackoff.failures, retryInMs: recoveryBackoff.remainingMs() }, account: { ...account }, lastChecked: new Date().toISOString() };
+  return { ok: true, worker: 'ONLINE', browser: browserRunning ? 'RUNNING' : 'STOPPED', connection, paired: Boolean(paired), running, lastError, lastClaimReason, lastClaimAt, workerPid: process.pid, browserProfile: path.basename(PROFILE_DIR), recovery: { failures: recoveryBackoff.failures, retryInMs: recoveryBackoff.remainingMs() }, account: { ...account }, lastChecked: new Date().toISOString() };
 }
 
 async function refreshAccountIdentity(adapter) {
@@ -50,7 +52,7 @@ async function invalidateBrowser(error) {
 
 async function launchBrowser() {
   const browserExecutable = process.env.FACEBOOK_WORKER_CHROME_PATH;
-  const launched = await chromium.launchPersistentContext(PROFILE_DIR, { ...(browserExecutable ? { executablePath: browserExecutable } : { channel: 'chrome' }), headless: false, viewport: null, args: ['--start-maximized'] });
+  const launched = await chromium.launchPersistentContext(PROFILE_DIR, { ...(browserExecutable ? { executablePath: browserExecutable } : { channel: 'chrome' }), headless: false, viewport: null, args: ['--start-minimized'] });
   intentionalBrowserClose = false;
   launched.on('close', () => {
     if (context === launched) { context = null; page = null; }
@@ -63,6 +65,7 @@ async function launchBrowser() {
 
 async function ensureBrowser(options = {}) {
   const force = Boolean(options.force);
+  const focus = Boolean(options.focus);
   try {
     if (context) {
       const pages = context.pages();
@@ -83,18 +86,21 @@ async function ensureBrowser(options = {}) {
     if (isBrowserClosedError(error)) { await invalidateBrowser(error); recoveryBackoff.failure(); }
     throw error;
   }
-  try {
-    const cdp = await context.newCDPSession(page);
-    const { windowId } = await cdp.send('Browser.getWindowForTarget');
-    await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal', left: 80, top: 60, width: 1280, height: 820 } });
-    await cdp.detach();
-  } catch {}
-  await page.bringToFront();
+  if (focus) {
+    try {
+      const cdp = await context.newCDPSession(page);
+      const { windowId } = await cdp.send('Browser.getWindowForTarget');
+      await cdp.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal', left: 80, top: 60, width: 1280, height: 820 } });
+      await cdp.detach();
+    } catch {}
+    await page.bringToFront();
+  }
   return new FacebookPageAdapter(page);
 }
 
-async function openFacebookPage(targetUrl) {
-  const adapter = await ensureBrowser({ force: true });
+async function openFacebookPage(targetUrl, options = {}) {
+  const focus = Boolean(options.focus);
+  const adapter = await ensureBrowser({ force: true, focus });
   try {
     await page.goto(targetUrl || FACEBOOK_HOME, { waitUntil: 'domcontentloaded', timeout: 45000 });
   } catch (error) {
@@ -102,7 +108,7 @@ async function openFacebookPage(targetUrl) {
     if (!aborted || classifyFacebookUrl(page.url()) === 'INVALID') throw error;
     await page.waitForTimeout(1000);
   }
-  await page.bringToFront();
+  if (focus) await page.bringToFront();
   const connection = await adapter.connectionState();
   if (connection === 'CONNECTED') lastError = '';
   return publicStatus(connection);
@@ -153,7 +159,16 @@ async function processOnce() {
   if (connection !== 'CONNECTED') { lastError = connection; return; }
   running = true;
   try {
-    const claim = await apiPost({ action: 'claimFacebookBumpJob' });
+    let claim;
+    try {
+      claim = await apiPost({ action: 'claimFacebookBumpJob' });
+      lastClaimReason = claim.job ? 'CLAIMED' : String(claim.reason || 'NO_JOB');
+    } catch (error) {
+      lastClaimReason = `ERROR:${String(error && error.message || error).slice(0, 200)}`;
+      throw error;
+    } finally {
+      lastClaimAt = new Date().toISOString();
+    }
     if (!claim.job) return;
     const { job, previousOwnedComment, cleanupOld } = claim;
     try {
@@ -201,8 +216,10 @@ function schedule() {
 function cors(req, res) {
   const origin = req.headers.origin || '';
   const loopbackOrigin = /^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/.test(origin);
-  if (origin && !ALLOWED_ORIGINS.has(origin) && !loopbackOrigin) return false;
+  const localPairNavigation = req.method === 'POST' && req.url === '/pair-browser' && origin === 'null';
+  if (origin && !ALLOWED_ORIGINS.has(origin) && !loopbackOrigin && !localPairNavigation) return false;
   if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
+  if (req.headers['access-control-request-private-network'] === 'true') res.setHeader('Access-Control-Allow-Private-Network', 'true');
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
@@ -210,7 +227,13 @@ function cors(req, res) {
 }
 
 function readBody(req) {
-  return new Promise((resolve, reject) => { let body = ''; req.on('data', (chunk) => { body += chunk; if (body.length > 200000) reject(Error('REQUEST_TOO_LARGE')); }); req.on('end', () => { try { resolve(body ? JSON.parse(body) : {}); } catch { reject(Error('INVALID_JSON')); } }); req.on('error', reject); });
+  return new Promise((resolve, reject) => { let body = ''; req.on('data', (chunk) => { body += chunk; if (body.length > 200000) reject(Error('REQUEST_TOO_LARGE')); }); req.on('end', () => { try { const contentType=String(req.headers['content-type']||'').toLowerCase();resolve(!body?{}:contentType.startsWith('application/x-www-form-urlencoded')?Object.fromEntries(new URLSearchParams(body)):JSON.parse(body)); } catch { reject(Error('INVALID_BODY')); } }); req.on('error', reject); });
+}
+
+function pairBridgeResponse(res, status) {
+  const payload=JSON.stringify({ type: 'DMO_FACEBOOK_PAIR_RESULT', status }).replace(/</g,'\\u003c');
+  res.setHeader('Content-Type','text/html;charset=utf-8');
+  return res.end(`<!doctype html><meta charset="utf-8"><title>DMO Facebook Pair</title><p>Pairing complete. This window will close automatically.</p><script>if(window.opener)window.opener.postMessage(${payload},'https://gunzaza085-lang.github.io');setTimeout(()=>window.close(),400);<\/script>`);
 }
 
 const server = http.createServer(async (req, res) => {
@@ -220,9 +243,10 @@ const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && req.url === '/status') return res.end(JSON.stringify(await connectionStatus()));
     const body = await readBody(req);
-    if (req.method === 'POST' && req.url === '/connect') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(FACEBOOK_HOME))); }
-    if (req.method === 'POST' && req.url === '/test') { browserAutoRecoveryEnabled = true; const adapter = await ensureBrowser({ force: true }); const connection = await refreshAccountIdentity(adapter); if (connection === 'CONNECTED') lastError = ''; return res.end(JSON.stringify(publicStatus(connection))); }
-    if (req.method === 'POST' && req.url === '/open') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(body.url || FACEBOOK_HOME))); }
+    if (req.method === 'POST' && req.url === '/connect') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(FACEBOOK_HOME,{focus:true}))); }
+    if (req.method === 'POST' && req.url === '/test') { browserAutoRecoveryEnabled = true; const adapter = await ensureBrowser({ force: true, focus: true }); const connection = await refreshAccountIdentity(adapter); if (connection === 'CONNECTED') lastError = ''; return res.end(JSON.stringify(publicStatus(connection))); }
+    if (req.method === 'POST' && req.url === '/open') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(body.url || FACEBOOK_HOME,{focus:true}))); }
+    if (req.method === 'POST' && req.url === '/pair-browser') { if (!/^https:\/\/script\.google\.com\/macros\/s\//.test(String(body.apiUrl || '')) || !body.token) throw Error('INVALID_PAIRING'); browserAutoRecoveryEnabled = true; let current=await connectionStatus();if(current.connection!=='CONNECTED')current=await openFacebookPage(FACEBOOK_HOME,{focus:true});if(current.connection==='CONNECTED'){paired={apiUrl:String(body.apiUrl),token:String(body.token)};schedule();} return pairBridgeResponse(res,await connectionStatus()); }
     if (req.method === 'POST' && req.url === '/pair') { if (!/^https:\/\/script\.google\.com\/macros\/s\//.test(String(body.apiUrl || '')) || !body.token) throw Error('INVALID_PAIRING'); paired = { apiUrl: String(body.apiUrl), token: String(body.token) }; schedule(); return res.end(JSON.stringify(await connectionStatus())); }
     if (req.method === 'POST' && req.url === '/disconnect') { paired = null; running = false; clearInterval(timer); timer = null; browserAutoRecoveryEnabled = false; intentionalBrowserClose = true; if (context) await context.close(); context = null; page = null; recoveryBackoff.success(); return res.end(JSON.stringify(publicStatus('DISCONNECTED'))); }
     res.writeHead(404); return res.end(JSON.stringify({ ok: false, error: 'NOT_FOUND' }));
