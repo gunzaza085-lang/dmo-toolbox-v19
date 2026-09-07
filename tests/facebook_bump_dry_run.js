@@ -218,12 +218,12 @@ test('Worker uses one persistent browser and can focus an existing window',()=>{
   assert(worker.includes("openFacebookPage(FACEBOOK_HOME,{focus:true})")&&worker.includes("ensureBrowser({ force: true, focus: true })"),'explicit browser actions cannot focus the worker window');
   assert(worker.includes("worker: 'ONLINE'")&&worker.includes("browser: browserRunning ? 'RUNNING' : 'STOPPED'"),'worker/browser status missing');
   assert(worker.includes('BACKEND_TIMEOUT_MS')&&worker.includes('AbortController'),'stalled backend request recovery missing');
-  assert(worker.includes('http://127.0.0.1:4173,http://localhost:4173')&&!worker.includes('loopbackOrigin'),'worker CORS still trusts arbitrary localhost origins');
+  assert(worker.includes("WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io'")&&!worker.includes('loopbackOrigin'),'worker CORS trusts a non-production origin by default');
   assert(worker.includes("if (!origin && req.method !== 'GET') return false"),'unauthenticated no-origin POST requests are still accepted');
   assert(worker.includes("req.url === '/open')")&&worker.includes('openFacebookPage(FACEBOOK_HOME,{focus:true})')&&!worker.includes('openFacebookPage(body.url || FACEBOOK_HOME'),'local open endpoint can navigate the Facebook profile to an arbitrary origin');
   assert(frontend.includes("targetAddressSpace:'local'"),'Production fetch does not request local-network access');
   assert(worker.includes("Access-Control-Allow-Private-Network', 'true'"),'worker does not approve private-network preflight');
-  assert(index.includes('app.js?v=20260907-v20.2-longrun-1')&&serviceWorker.includes('app.js?v=20260907-v20.2-longrun-1'),'PWA cache does not refresh the long-run worker fix');
+  assert(index.includes('app.js?v=20260908-v20.2-longrun-performance-2')&&serviceWorker.includes('app.js?v=20260908-v20.2-longrun-performance-2'),'PWA cache does not include the combined long-run/performance build');
   assert(frontend.includes('id="fbPauseAllBtn" ${state.facebookBump.pending?\'disabled\':\'\'}')&&frontend.includes('id="fbResumeAllBtn" ${state.facebookBump.pending?\'disabled\':\'\'}'),'stale admin state can lock out pause/resume recovery');
   assert(frontend.includes('facebookPairViaLocalTab')&&frontend.includes("event.data?.type!=='DMO_FACEBOOK_PAIR_RESULT'"),'BackOffice local pair bridge is missing');
   assert(worker.includes("req.url === '/pair-browser'")&&worker.includes('pairBridgeResponse'),'worker local pair bridge is missing');

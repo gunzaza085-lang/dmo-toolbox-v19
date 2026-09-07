@@ -38,7 +38,7 @@ const context = {
   Session: { getScriptTimeZone: () => 'Asia/Bangkok' },
 };
 vm.createContext(context);
-new vm.Script(`${gas}\n;globalThis.__v201={calculateServerPricing,publicProduct,uniqueOrderId,ORDER_TRANSITIONS,PUBLIC_SETTING_FIELDS,PUBLIC_PRODUCT_FIELDS};`).runInContext(context);
+new vm.Script(`${gas}\n;globalThis.__v201={calculateServerPricing,categoryDiscountPricing,publicProduct,uniqueOrderId,ORDER_TRANSITIONS,PUBLIC_SETTING_FIELDS,PUBLIC_PRODUCT_FIELDS};`).runInContext(context);
 const api = context.__v201;
 
 check('5. Promotion calculation', () => {
@@ -137,6 +137,98 @@ check('24. OWNER password management security', () => {
   assert(gas.includes("if(!env.ownerSetupAllowed)throw Error('ไม่อนุญาตให้ตั้ง OWNER บนฐานข้อมูล BACKUP')"), 'Backup ยังตั้ง OWNER ได้');
   assert(app.includes('บัญชีและความปลอดภัย') && app.includes('ownerCurrentPassword'), 'ไม่มีฟอร์มเปลี่ยนรหัสใน Admin Settings');
   assert(!/console\.log\([^\n]*(?:currentPassword|newPassword|confirmPassword|passwordHash|passwordSalt)/.test(app+gas), 'พบการ log credential');
+});
+
+check('25. Shop identity settings and blank values', () => {
+  assert(app.includes("if (hasOwn(settings, key)) return String(settings[key] ?? '').trim();"), 'Settings ยังไม่มาก่อน config หรือไม่รองรับค่าว่าง');
+  assert(!app.includes("cfg.shopName || state.settings.shopName"), 'config ยังทับชื่อร้านจาก Settings');
+  assert(!app.includes("settings.ownerName || 'Natthananat Kawinwatthanakorn'"), 'ชื่อเจ้าของว่างยังถูกแทนด้วยค่าเดิม');
+  assert(app.includes('เว้นว่างเพื่อไม่แสดงชื่อร้าน') && app.includes('เว้นว่างเพื่อไม่แสดงชื่อเจ้าของ'), 'ฟอร์มไม่ได้แจ้งว่าซ่อนชื่อได้');
+  assert(app.includes("shopName: document.getElementById('setShopName').value.trim()"), 'ชื่อร้านไม่ได้บันทึกค่าที่ตัดช่องว่างแล้ว');
+  assert(app.includes("ownerName: document.getElementById('setOwnerName').value.trim()"), 'ชื่อเจ้าของไม่ได้บันทึกค่าที่ตัดช่องว่างแล้ว');
+  const saveSettingsSource = app.slice(app.indexOf('async function saveSettingsAction()'), app.indexOf('async function adjustStockAction'));
+  assert(saveSettingsSource.includes('await loadAdmin(true);') && saveSettingsSource.includes('await loadData(false);'), 'หลังบันทึก Settings ยังใช้ Admin cache เก่า');
+  const identitySource = app.slice(app.indexOf('const hasOwn ='), app.indexOf('const safeExternalUrl'));
+  const identityContext = { cfg:{shopName:'Config Shop',ownerName:'Config Owner'}, state:{settings:{}} };
+  vm.createContext(identityContext);
+  new vm.Script(`${identitySource};globalThis.__identity=shopIdentity;`).runInContext(identityContext);
+  assert(identityContext.__identity({shopName:'ร้านใหม่',ownerName:'เจ้าของใหม่'}).shopName === 'ร้านใหม่', 'ชื่อจาก Settings ไม่ชนะ config');
+  assert(identityContext.__identity({shopName:'',ownerName:''}).shopName === '', 'ชื่อร้านว่างถูกแทนด้วยค่าเริ่มต้น');
+  assert(identityContext.__identity({shopName:'',ownerName:''}).ownerName === '', 'ชื่อเจ้าของว่างถูกแทนด้วยค่าเริ่มต้น');
+  assert(identityContext.__identity({}).shopName === 'Config Shop', 'ค่าเริ่มต้นจาก config ใช้ไม่ได้เมื่อ Settings ยังไม่มี key');
+});
+
+check('26. Category discount 0%', () => {
+  const pricing=api.calculateServerPricing([{kind:'SEAL',lineTotal:100},{kind:'ITEM',lineTotal:200},{kind:'SERVICE',lineTotal:300}],[],{});
+  assert(pricing.categoryDiscountTotal===0,'0% ต้องไม่มีส่วนลด');
+  assert(pricing.subtotal===600&&pricing.total===600,'ยอด 0% ไม่ถูกต้อง');
+});
+
+check('27. Seal category discount 5%', () => {
+  const pricing=api.calculateServerPricing([{kind:'SEAL',lineTotal:1000}],[],{categoryDiscountSealPercent:5});
+  assert(pricing.categoryDiscounts.find(x=>x.category==='SEAL').amount===50,'ส่วนลดซีล 5% ไม่ถูกต้อง');
+  assert(pricing.total===950,'ยอดสุทธิซีล 5% ไม่ถูกต้อง');
+});
+
+check('28. Item category discount 10% including T Money', () => {
+  const pricing=api.calculateServerPricing([{kind:'ITEM',lineTotal:500},{kind:'TMONEY',lineTotal:100}],[],{categoryDiscountItemPercent:10});
+  const item=pricing.categoryDiscounts.find(x=>x.category==='ITEM');
+  assert(item.subtotal===600&&item.amount===60,'ไอเทมและเงิน T ต้องรวมหมวดเดียวกันที่ 10%');
+  assert(pricing.total===540,'ยอดสุทธิไอเทม 10% ไม่ถูกต้อง');
+});
+
+check('29. Mixed category discounts', () => {
+  const pricing=api.calculateServerPricing([{kind:'SEAL',lineTotal:1000},{kind:'ITEM',lineTotal:500},{kind:'SERVICE',lineTotal:2000}],[],{categoryDiscountSealPercent:5,categoryDiscountItemPercent:10,categoryDiscountServicePercent:0});
+  assert(pricing.categoryDiscountTotal===100,'ส่วนลดรวมแบบ mixed ไม่ถูกต้อง');
+  assert(pricing.discount===100&&pricing.total===3400,'ยอดสุทธิ mixed category ไม่ถูกต้อง');
+  const pricingSource=app.slice(app.indexOf('function promoIsActive'),app.indexOf('function cartPanel'));
+  const clientContext={Date,Math,Number,Object,state:{cart:[{kind:'SEAL',price:1000,quantity:1},{kind:'ITEM',price:500,quantity:1},{kind:'SERVICE',price:2000,quantity:1}],settings:{categoryDiscountSealPercent:5,categoryDiscountItemPercent:10,categoryDiscountServicePercent:0},promotions:[]},html:value=>String(value),money:value=>String(value)};
+  vm.createContext(clientContext);
+  new vm.Script(`${pricingSource};globalThis.__pricingSummary=pricingSummary;`).runInContext(clientContext);
+  const clientPricing=clientContext.__pricingSummary();
+  assert(clientPricing.categoryDiscountTotal===pricing.categoryDiscountTotal&&clientPricing.total===pricing.total,'ยอดฝั่งหน้าเว็บไม่ตรงกับ Server');
+});
+
+check('30. Old order pricing snapshot remains unchanged', () => {
+  const created=api.calculateServerPricing([{kind:'SEAL',lineTotal:1000}],[],{categoryDiscountSealPercent:5});
+  const stored=JSON.parse(JSON.stringify(created));
+  const current=api.calculateServerPricing([{kind:'SEAL',lineTotal:1000}],[],{categoryDiscountSealPercent:10});
+  assert(stored.categoryDiscounts[0].percent===5&&stored.total===950,'snapshot เดิมเปลี่ยนตาม Settings ใหม่');
+  assert(current.categoryDiscounts[0].percent===10&&current.total===900,'Settings ใหม่ไม่ถูกนำไปใช้กับออเดอร์ใหม่');
+  assert(gas.includes('pricingJson:JSON.stringify(pricing)'),'Order ไม่ได้บันทึก pricing snapshot');
+  assert(app.includes('orderPricingSnapshot(order)'),'หน้าหลังร้านไม่ได้อ่าน pricing snapshot ของ Order');
+});
+
+check('31. Category discount settings UI and additive migration', () => {
+  ['categoryDiscountSealPercent','categoryDiscountItemPercent','categoryDiscountServicePercent'].forEach(key=>{
+    assert(gas.includes(`${key}:0`),`DEFAULT_SETTINGS ขาด ${key}`);
+    assert(api.PUBLIC_SETTING_FIELDS.includes(key),`Public settings ขาด ${key}`);
+  });
+  assert(gas.includes("DATABASE_VERSION+'-gate-a-4'"),'schema gate ไม่ได้บังคับ seed Settings ใหม่แบบ additive');
+  assert(gas.includes("setNumberFormat('0.##')"),'เซลล์ส่วนลดอาจสืบรูปแบบวันที่จาก Settings แถวก่อนหน้า');
+  const settingsSource=app.slice(app.indexOf('function adminSettingsBase'),app.indexOf('function adminLogs'));
+  const settingsContext={state:{adminData:{settings:{categoryDiscountSealPercent:5,categoryDiscountItemPercent:10,categoryDiscountServicePercent:0},security:{actor:{role:'OWNER'}}}},shopIdentity:()=>({shopName:'',ownerName:''}),html:value=>String(value),String};
+  vm.createContext(settingsContext);
+  new vm.Script(`${settingsSource};globalThis.__settingsHtml=adminSettings();`).runInContext(settingsContext);
+  ['setCategoryDiscountSeal','setCategoryDiscountItem','setCategoryDiscountService'].forEach(id=>assert(settingsContext.__settingsHtml.includes(`id="${id}"`),`ฟอร์มขาด ${id}`));
+  assert((settingsContext.__settingsHtml.match(/id="saveSettingsBtn"/g)||[]).length===1,'ปุ่มบันทึก Settings ต้องมีหนึ่งปุ่ม');
+});
+
+check('32. Admin scoped loading and large-list performance', () => {
+  assert(gas.includes("readAdmin(actor,body.scope)"), 'getAdminData ไม่ส่ง scope ไป Server');
+  assert(gas.includes("requestedScope||'ALL'"), 'Client รุ่นเก่าไม่ได้ fallback เป็น ALL');
+  assert(gas.includes("needs('inventory')") && gas.includes("needs('customers')"), 'Server ยังไม่แยกโหลดข้อมูลตามเมนู');
+  assert(app.includes("action:'getAdminData',token:state.adminToken,scope"), 'Client ไม่ได้ขอข้อมูลตามเมนู');
+  assert(app.includes('state.adminLoadedScopes.add(scope)'), 'ไม่มี cache ของ scope ที่โหลดแล้ว');
+  assert(app.includes("state.adminView !== 'facebookBump' && !state.adminLoadedScopes.has(state.adminView)"), 'หน้า Admin ยังแสดงข้อมูล bootstrap เป็นศูนย์ก่อน scope โหลดเสร็จ');
+  assert(app.includes('id="retryAdminScopeBtn"'), 'หน้า Admin ไม่มีทาง retry เมื่อโหลด scope ไม่สำเร็จ');
+  assert(app.includes('state.adminLoading = false;adminLoadPromise=null;render();'), 'สถานะโหลด Admin ไม่ render ใหม่หลัง request ล้มเหลว');
+  const ordersSource=app.slice(app.indexOf('function adminOrders()'),app.indexOf('function integrityPage'));
+  assert(ordersSource.includes('itemsByOrder=new Map()'), 'หน้าออเดอร์ยังไม่มีดัชนี Order Items');
+  assert(!ordersSource.includes('itemRows.filter('), 'หน้าออเดอร์ยัง scan Order Items ซ้ำต่อออเดอร์');
+  ['adminOrderVisible','adminCatalogVisible','inventoryVisible','customerVisible'].forEach(key=>assert(app.includes(key),`ไม่มี batch limit: ${key}`));
+  ['loadMoreOrdersBtn','loadMoreAdminCatalogBtn','loadMoreInventoryBtn','loadMoreCustomersBtn'].forEach(id=>assert(app.includes(id),`ไม่มีปุ่มแสดงเพิ่ม: ${id}`));
+  assert(read('index.html').includes('20260908-v20.2-longrun-performance-2')&&read('sw.js').includes('gun-shop-dmo-v20-2-longrun-performance-2'),'PWA cache version ยังไม่ตรงกับ combined long-run/performance build');
 });
 
 [

@@ -1,7 +1,5 @@
 'use strict';
 
-const crypto = require('crypto');
-
 const FACEBOOK_HOME = 'https://www.facebook.com/';
 const LOGIN_PATHS = ['/login', '/checkpoint', '/recover'];
 const COMMENT_LABELS = [
@@ -21,20 +19,27 @@ function classifyFacebookUrl(value) {
   return 'CONNECTED';
 }
 
-function stableReference(value) {
-  return `UNVERIFIED-${crypto.createHash('sha256').update(String(value || '')).digest('hex').slice(0, 20)}`;
+function verifiedCommentKey(reference) {
+  try {
+    const url = new URL(reference, FACEBOOK_HOME);
+    const commentId = url.searchParams.get('comment_id') || url.searchParams.get('reply_comment_id') || '';
+    const facebookHost = /^(?:www\.|m\.|web\.)?facebook\.com$/i.test(url.hostname);
+    const postPath = /\/(?:groups\/[^/]+\/(?:posts|permalink)|posts)\//i.test(url.pathname);
+    return facebookHost && postPath && commentId && !commentId.startsWith('client:') ? commentId : '';
+  } catch { return ''; }
 }
 
 function selectNewVerifiedReference(beforeReferences, afterReferences) {
-  const before = new Set((beforeReferences || []).filter(Boolean));
-  const fresh = (afterReferences || []).filter((reference) => reference && !before.has(reference));
-  return fresh.find((reference) => {
-    try {
-      const url = new URL(reference, FACEBOOK_HOME);
-      const commentId = decodeURIComponent(url.searchParams.get('comment_id') || url.searchParams.get('reply_comment_id') || '');
-      return commentId && !commentId.startsWith('client:') && /\/(?:groups\/[^/]+\/(?:posts|permalink)|posts)\//i.test(url.pathname);
-    } catch { return false; }
+  const before = new Set((beforeReferences || []).map(verifiedCommentKey).filter(Boolean));
+  return (afterReferences || []).find((reference) => {
+    const key = verifiedCommentKey(reference);
+    return key && !before.has(key);
   }) || '';
+}
+
+function requireVerifiedCommentReference(reference) {
+  if (!verifiedCommentKey(reference)) throw Error('COMMENT_REFERENCE_UNVERIFIED_NEEDS_REVIEW');
+  return reference;
 }
 
 class FacebookPageAdapter {
@@ -130,8 +135,7 @@ class FacebookPageAdapter {
           href = selectNewVerifiedReference(beforeReferences, [this.page.url(), ...afterReferences]);
           if (!href) await this.page.waitForTimeout(500);
         }
-        if (!href) throw Error('COMMENT_REFERENCE_UNVERIFIED_NEEDS_REVIEW');
-        return { ok: true, externalCommentId: href, verifiedReference: true };
+        return { ok: true, externalCommentId: requireVerifiedCommentReference(href), verifiedReference: true };
       }
     }
     throw Error('COMMENT_SUBMIT_TIMEOUT_NEEDS_REVIEW');
@@ -215,4 +219,4 @@ class FacebookPageAdapter {
   }
 }
 
-module.exports = { FACEBOOK_HOME, COMMENT_LABELS, FacebookPageAdapter, classifyFacebookUrl, selectNewVerifiedReference, stableReference };
+module.exports = { FACEBOOK_HOME, COMMENT_LABELS, FacebookPageAdapter, classifyFacebookUrl, requireVerifiedCommentReference, selectNewVerifiedReference };

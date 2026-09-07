@@ -1,10 +1,10 @@
 'use strict';
 
 const http = require('http');
-const fs = require('fs');
 const path = require('path');
 const { chromium } = require('playwright-core');
 const { FACEBOOK_HOME, FacebookPageAdapter, classifyFacebookUrl } = require('./facebook-page');
+const { portableProfileDir } = require('./portable-preflight');
 const { RecoveryBackoff, isBrowserClosedError, needsReviewError } = require('./recovery');
 const { acquireInstanceLock } = require('./instance-lock');
 const { createPairingStore, validApiUrl, validWorkerToken } = require('./pairing-store');
@@ -14,14 +14,10 @@ const PORT = Number(process.env.FACEBOOK_WORKER_PORT || 17821);
 const BACKEND_TIMEOUT_MS = Number(process.env.FACEBOOK_WORKER_BACKEND_TIMEOUT_MS || 45000);
 const POLL_INTERVAL_MS = Math.max(15000, Number(process.env.FACEBOOK_WORKER_POLL_MS || 30000));
 const HEARTBEAT_INTERVAL_MS = Math.max(15000, Number(process.env.FACEBOOK_WORKER_HEARTBEAT_MS || 30000));
-const LEGACY_PROFILE_DIR = path.resolve(__dirname, '..', '.facebook-worker-profile');
-const PORTABLE_PROFILE_DIR = process.env.LOCALAPPDATA
-  ? path.join(process.env.LOCALAPPDATA, 'GUN-SHOP-DMO', 'FacebookWorkerProfile')
-  : LEGACY_PROFILE_DIR;
-const PROFILE_DIR = path.resolve(process.env.FACEBOOK_WORKER_PROFILE_DIR || (fs.existsSync(LEGACY_PROFILE_DIR) ? LEGACY_PROFILE_DIR : PORTABLE_PROFILE_DIR));
+const PROFILE_DIR = portableProfileDir();
 const PAIRING_FILE = path.join(PROFILE_DIR, 'worker-pair.json');
 const INSTANCE_LOCK_FILE = path.join(PROFILE_DIR, 'worker-instance.lock');
-const ALLOWED_ORIGINS = new Set((process.env.WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io,http://127.0.0.1:4173,http://localhost:4173').split(',').map((item) => item.trim()).filter(Boolean));
+const ALLOWED_ORIGINS = new Set((process.env.WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io').split(',').map((item) => item.trim()).filter(Boolean));
 let instanceLock;
 try { instanceLock = acquireInstanceLock(INSTANCE_LOCK_FILE); }
 catch (error) { console.error(String(error && error.message || error)); process.exit(1); }
@@ -71,7 +67,8 @@ async function invalidateBrowser(error) {
 }
 
 async function launchBrowser() {
-  const launched = await chromium.launchPersistentContext(PROFILE_DIR, { channel: 'chrome', headless: false, viewport: null, args: ['--start-minimized'] });
+  const browserExecutable = process.env.FACEBOOK_WORKER_CHROME_PATH;
+  const launched = await chromium.launchPersistentContext(PROFILE_DIR, { ...(browserExecutable ? { executablePath: browserExecutable } : { channel: 'chrome' }), headless: false, viewport: null, args: ['--start-minimized'] });
   intentionalBrowserClose = false;
   launched.on('close', () => {
     if (context === launched) { context = null; page = null; }
@@ -345,8 +342,8 @@ server.listen(PORT, HOST, () => {
   maintainBrowser();
 });
 server.on('error', (error) => {
-  if (error && error.code === 'EADDRINUSE') console.error(`Facebook worker is already running at http://${HOST}:${PORT}`);
-  else console.error(String(error && error.stack || error));
+  if (error && error.code === 'EADDRINUSE') console.error(`[ERROR] Port ${PORT} is already in use. Close the other Worker or program, then try again.`);
+  else console.error(`[ERROR] Facebook Worker could not start: ${String(error && error.message || error)}`);
   process.exitCode = 1;
 });
 async function shutdown() { clearInterval(timer); clearInterval(healthTimer); clearInterval(heartbeatTimer); intentionalBrowserClose = true; if (context) await context.close().catch(() => {}); process.exit(0); }
