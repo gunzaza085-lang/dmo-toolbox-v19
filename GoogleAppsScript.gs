@@ -161,7 +161,7 @@ function sheet(name,headers){
   return s;
 }
 function ensureDatabase(){
-  const schemaKey=DATABASE_VERSION+'-gate-a-3',cache=CacheService.getScriptCache(),cacheKey='database-ready-'+schemaKey,properties=PropertiesService.getScriptProperties(),persistentKey='DATABASE_SCHEMA_READY_'+schemaKey.replace(/\W/g,'_');
+  const schemaKey=DATABASE_VERSION+'-gate-a-4',cache=CacheService.getScriptCache(),cacheKey='database-ready-'+schemaKey,properties=PropertiesService.getScriptProperties(),persistentKey='DATABASE_SCHEMA_READY_'+schemaKey.replace(/\W/g,'_');
   if(cache.get(cacheKey)==='TRUE')return;
   if(properties.getProperty(persistentKey)==='TRUE'){cache.put(cacheKey,'TRUE',300);return;}
   sheet(SHEETS.seals,HEADERS.seals); sheet(SHEETS.items,HEADERS.items); sheet(SHEETS.services,HEADERS.services);
@@ -173,10 +173,11 @@ function ensureDatabase(){
   cache.put(cacheKey,'TRUE',300);
 }
 function seedSettings(){
-  const s=sheet(SHEETS.settings,HEADERS.settings), values=s.getDataRange().getValues(), keys=new Set(values.slice(1).map(r=>String(r[0])));
+  const s=sheet(SHEETS.settings,HEADERS.settings), values=s.getDataRange().getValues(), keys=new Set(values.slice(1).map(r=>String(r[0]))),categoryDiscountKeys=new Set(['categoryDiscountSealPercent','categoryDiscountItemPercent','categoryDiscountServicePercent']);
   Object.keys(DEFAULT_SETTINGS).forEach(k=>{
     const value=DEFAULT_SETTINGS[k],safeValue=typeof value==='string'?safeSheetText(value,5000):value;
-    if(!keys.has(k)){s.appendRow([k,safeValue,'']);return;}
+    if(!keys.has(k)){s.appendRow([k,safeValue,'']);if(categoryDiscountKeys.has(k))s.getRange(s.getLastRow(),2).setNumberFormat('0.##');return;}
+    if(categoryDiscountKeys.has(k)){const rowIndex=values.findIndex((row,index)=>index>0&&String(row[0])===k);if(rowIndex>0)s.getRange(rowIndex+1,2).setNumberFormat('0.##');}
     if(k==='facebookBumpDefaultMessage'){
       const rowIndex=values.findIndex((row,index)=>index>0&&String(row[0])===k);
       if(rowIndex>0&&(!String(values[rowIndex][1]||'').trim()||String(values[rowIndex][1])==='#ERROR!'))s.getRange(rowIndex+1,2).setValue(safeValue);
@@ -529,7 +530,7 @@ function sortCatalog(s,headers,kind){
 }
 function saveSettings(settingsObj,actor){return withLock(()=>{
   const s=sheet(SHEETS.settings,HEADERS.settings),values=s.getDataRange().getValues(),rowByKey=new Map(),categoryDiscountKeys=new Set(['categoryDiscountSealPercent','categoryDiscountItemPercent','categoryDiscountServicePercent']);for(let i=1;i<values.length;i++)rowByKey.set(String(values[i][0]),i+1);
-  Object.keys(settingsObj||{}).forEach(k=>{const value=categoryDiscountKeys.has(k)?Math.max(0,Math.min(100,number(settingsObj[k]))):settingsObj[k],row=rowByKey.get(k);if(!row){s.appendRow([k,value,'']);rowByKey.set(k,s.getLastRow());}else s.getRange(row,2).setValue(value);});if(Object.prototype.hasOwnProperty.call(settingsObj||{},'sessionDays'))PropertiesService.getScriptProperties().setProperty('SESSION_DAYS',String(settingsObj.sessionDays));
+  Object.keys(settingsObj||{}).forEach(k=>{const value=categoryDiscountKeys.has(k)?Math.max(0,Math.min(100,number(settingsObj[k]))):settingsObj[k],row=rowByKey.get(k);if(!row){s.appendRow([k,value,'']);rowByKey.set(k,s.getLastRow());}else s.getRange(row,2).setValue(value);if(categoryDiscountKeys.has(k))s.getRange(rowByKey.get(k),2).setNumberFormat('0.##');});if(Object.prototype.hasOwnProperty.call(settingsObj||{},'sessionDays'))PropertiesService.getScriptProperties().setProperty('SESSION_DAYS',String(settingsObj.sessionDays));
   log('SETTINGS','SYSTEM','','',actor||'SYSTEM');return output({ok:true});
 });}
 function productSaleUnit(product){return String(product.unit||((product.kind||'')==='SEAL'?'ชุด':(product.kind||'')==='TMONEY'?'T':'ชิ้น'));}

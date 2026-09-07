@@ -204,7 +204,8 @@ check('31. Category discount settings UI and additive migration', () => {
     assert(gas.includes(`${key}:0`),`DEFAULT_SETTINGS ขาด ${key}`);
     assert(api.PUBLIC_SETTING_FIELDS.includes(key),`Public settings ขาด ${key}`);
   });
-  assert(gas.includes("DATABASE_VERSION+'-gate-a-3'"),'schema gate ไม่ได้บังคับ seed Settings ใหม่แบบ additive');
+  assert(gas.includes("DATABASE_VERSION+'-gate-a-4'"),'schema gate ไม่ได้บังคับ seed Settings ใหม่แบบ additive');
+  assert(gas.includes("setNumberFormat('0.##')"),'เซลล์ส่วนลดอาจสืบรูปแบบวันที่จาก Settings แถวก่อนหน้า');
   const settingsSource=app.slice(app.indexOf('function adminSettingsBase'),app.indexOf('function adminLogs'));
   const settingsContext={state:{adminData:{settings:{categoryDiscountSealPercent:5,categoryDiscountItemPercent:10,categoryDiscountServicePercent:0},security:{actor:{role:'OWNER'}}}},shopIdentity:()=>({shopName:'',ownerName:''}),html:value=>String(value),String};
   vm.createContext(settingsContext);
