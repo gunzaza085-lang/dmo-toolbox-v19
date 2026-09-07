@@ -36,6 +36,7 @@ const HEADERS = {
 };
 const DEFAULT_SETTINGS = {
   shopName:'GUN SHOP DMO', ownerName:'Natthananat Kawinwatthanakorn', promoThreshold:100, promoReward:150,
+  categoryDiscountSealPercent:0, categoryDiscountItemPercent:0, categoryDiscountServicePercent:0,
   orderNotice:'รายการนี้ยังไม่ใช่การยืนยันคำสั่งซื้อ กรุณารอร้านตรวจสอบสต๊อกและยืนยันยอดก่อนโอน',
   autoRefreshSeconds:60, allowOrderSave:'TRUE', showStock:'TRUE', facebookUrl:'', lineUrl:'', servicePosterUrl:'',
   orderSubmitCooldownSeconds:30, orderRateWindowSeconds:300, orderRateMax:3,
@@ -52,12 +53,12 @@ const MONEY_T_PRODUCT_ID='TMONEY-001';
 const MONEY_T_CATEGORY='MONEY_T';
 
 const PUBLIC_PRODUCT_FIELDS=['id','kind','name','aliases','category','section','itemCategory','serviceCategory','description','price','unit','packSize','status','imageUrl','wikiName','badge','sortOrder','wikiTitle','wikiUrl','tags','searchKeywords'];
-const PUBLIC_SETTING_FIELDS=['shopName','ownerName','promoThreshold','promoReward','orderNotice','autoRefreshSeconds','allowOrderSave','showStock','facebookUrl','lineUrl','servicePosterUrl','orderSubmitCooldownSeconds','themeDefault','enablePWA','offlineCacheHours','mobileCompact','showMobileBottomNav','orderSuccessMessage'];
+const PUBLIC_SETTING_FIELDS=['shopName','ownerName','promoThreshold','promoReward','categoryDiscountSealPercent','categoryDiscountItemPercent','categoryDiscountServicePercent','orderNotice','autoRefreshSeconds','allowOrderSave','showStock','facebookUrl','lineUrl','servicePosterUrl','orderSubmitCooldownSeconds','themeDefault','enablePWA','offlineCacheHours','mobileCompact','showMobileBottomNav','orderSuccessMessage'];
 const PUBLIC_PROMOTION_FIELDS=['promotionId','name','type','value','minSpend','buyQty','freeQty','rewardText','startAt','endAt','status','priority','stackable','scope'];
 const ORDER_TRANSITIONS={NEW:['CHECKING','CANCELLED'],CHECKING:['PREPARING','CANCELLED'],PREPARING:['READY','CANCELLED'],READY:['COMPLETED','CANCELLED'],COMPLETED:[],CANCELLED:[]};
 const PASSWORD_ALGO='ITERATED-HMAC-SHA256-6000';
 const KNOWN_INSECURE_OWNER_HASH='77acc467d71ca17d5a480aa17d8b0b05d536139a61c99a08d1573dd81eab7d03';
-const PUBLIC_CACHE_KEY='public-catalog-v20-2-phase3-final-1';
+const PUBLIC_CACHE_KEY='public-catalog-v20-2-category-discount-1';
 const PRODUCTION_SPREADSHEET_ID='1AXYpPnrBRQPYhdDYODV80S4UTz5-gLEXIO_Jn8Rt-sM';
 const TEST_SPREADSHEET_ID='1WPtJgFe7jswHafieD7zJ19pjSxrdFZACT4iLCi_PfLM';
 const PUBLIC_CACHE_MUTATIONS=['createOrder','upsert','delete','softDelete','restoreTrash','permanentDelete','bulkUpdate','saveSettings','adjustStock','setStock','upsertPromotion','deletePromotion','updateOrder','applyImageZip'];
@@ -92,7 +93,7 @@ function doPost(e){
     if(adminWriteActions.includes(body.action)) requireRole(body.token,['OWNER','ADMIN']);
     if(staffWriteActions.includes(body.action)) requireRole(body.token,['OWNER','ADMIN','STAFF']);
     switch(body.action){
-      case'getAdminData': return output({ok:true,...readAdmin(actor)});
+      case'getAdminData': return output({ok:true,...readAdmin(actor,body.scope)});
       case'getFacebookBumpAdminData': return output({ok:true,facebookBump:getFacebookBumpData(actor)});
       case'upsert': return upsert(body.record,actor.userId);
       case'delete': return softDelete(body.kind,body.id,actor.userId);
@@ -160,7 +161,7 @@ function sheet(name,headers){
   return s;
 }
 function ensureDatabase(){
-  const schemaKey=DATABASE_VERSION+'-gate-a-2',cache=CacheService.getScriptCache(),cacheKey='database-ready-'+schemaKey,properties=PropertiesService.getScriptProperties(),persistentKey='DATABASE_SCHEMA_READY_'+schemaKey.replace(/\W/g,'_');
+  const schemaKey=DATABASE_VERSION+'-gate-a-3',cache=CacheService.getScriptCache(),cacheKey='database-ready-'+schemaKey,properties=PropertiesService.getScriptProperties(),persistentKey='DATABASE_SCHEMA_READY_'+schemaKey.replace(/\W/g,'_');
   if(cache.get(cacheKey)==='TRUE')return;
   if(properties.getProperty(persistentKey)==='TRUE'){cache.put(cacheKey,'TRUE',300);return;}
   sheet(SHEETS.seals,HEADERS.seals); sheet(SHEETS.items,HEADERS.items); sheet(SHEETS.services,HEADERS.services);
@@ -373,11 +374,21 @@ function readPublic(){
   const promotions=existingRows(SHEETS.promotions).filter(x=>x.promotionId&&x.name).map(normalizePromotion).filter(p=>p.status==='ACTIVE').map(publicPromotion);
   const result={seals,gameItems,services,moneyT:moneyT?publicProduct(moneyT):null,settings:publicSettings(),promotions,stockUpdatedAt:stockUpdatedAt()};putCachedPublic(result);return result;
 }
-function readAdmin(actor){
-  const seals=rows(SHEETS.seals).filter(x=>x.id&&x.name).map(normalizeSeal),allItems=rows(SHEETS.items).filter(x=>x.id&&x.name).map(normalizeItem),gameItems=allItems.filter(x=>x.kind==='ITEM'),moneyT=allItems.find(x=>x.kind==='TMONEY')||null,services=rows(SHEETS.services).filter(x=>x.id&&x.name).map(normalizeService),settingRows=rows(SHEETS.settings),settings={};settingRows.forEach(x=>{if(String(x.key)!=='apiKey'||(actor&&['OWNER','ADMIN'].includes(actor.role)))settings[x.key]=smart(x.value);});
-  const orders=rows(SHEETS.orders),reversedOrders=orders.slice().reverse(),customers=rows(SHEETS.customers),users=actor&&actor.role==='OWNER'?rows(SHEETS.users):[],systemRows=rows(SHEETS.system),setting=(key,fallback)=>Object.prototype.hasOwnProperty.call(settings,key)?settings[key]:fallback;
-  const actorUser=actor?rows(SHEETS.users).find(x=>String(x.userId)===String(actor.userId)):null,environment=environmentInfo();
-  return{seals,gameItems,services,moneyT,settings,orders:reversedOrders.filter(x=>!x.deletedAt).slice(0,500),deletedOrders:actor&&['OWNER','ADMIN'].includes(actor.role)?reversedOrders.filter(x=>!!x.deletedAt).slice(0,500):[],orderItems:rowsTail(SHEETS.orderItems,5000).reverse(),logs:rowsTail(SHEETS.logs,300).reverse(),stockLogs:rowsTail(SHEETS.stockLogs,500).reverse(),stockUpdatedAt:stockUpdatedAt(),customers:customers.slice().reverse().slice(0,1500),customerInteractions:rowsTail(SHEETS.customerInteractions,3000).reverse(),promotions:rows(SHEETS.promotions).map(normalizePromotion),trash:rowsTail(SHEETS.trash,1000).reverse(),databaseVersion:(systemRows.find(x=>String(x.key)==='databaseVersion')||{}).value||DATABASE_VERSION,security:{actor,account:actorUser?{userId:actorUser.userId,displayName:actorUser.displayName,role:actorUser.role,status:actorUser.status}:null,environment:environment.environment,users:listUsers(users),sessionDays:setting('sessionDays',7),autoLockMinutes:setting('autoLockMinutes',30),apiKeyConfigured:!!String(setting('apiKey',''))},automation:getAutomationData(actor,{seals,gameItems:gameItems.concat(moneyT?[moneyT]:[]),orders:orders.filter(x=>!x.deletedAt),customers,settings})};
+function readAdmin(actor,requestedScope){
+  const scope=String(requestedScope||'ALL'),all=scope==='ALL',needs=(...names)=>all||names.includes(scope),settingRows=rows(SHEETS.settings),settings={};
+  settingRows.forEach(x=>{if(String(x.key)!=='apiKey'||(actor&&['OWNER','ADMIN'].includes(actor.role)))settings[x.key]=smart(x.value);});
+  const setting=(key,fallback)=>Object.prototype.hasOwnProperty.call(settings,key)?settings[key]:fallback,userRows=rows(SHEETS.users),actorUser=actor?userRows.find(x=>String(x.userId)===String(actor.userId)):null,environment=environmentInfo(),result={settings,databaseVersion:getSystemValue('databaseVersion')||DATABASE_VERSION,security:{actor,account:actorUser?{userId:actorUser.userId,displayName:actorUser.displayName,role:actorUser.role,status:actorUser.status}:null,environment:environment.environment,users:(all||scope==='security')&&actor&&actor.role==='OWNER'?listUsers(userRows):[],sessionDays:setting('sessionDays',7),autoLockMinutes:setting('autoLockMinutes',30),apiKeyConfigured:!!String(setting('apiKey',''))}};
+  let seals=[],gameItems=[],moneyT=null,services=[],orders=[],customers=[];
+  if(needs('dashboard','catalog','images','inventory','calculator','analytics','reports','orders','marketing','automation','wiki')){seals=rows(SHEETS.seals).filter(x=>x.id&&x.name).map(normalizeSeal);const allItems=rows(SHEETS.items).filter(x=>x.id&&x.name).map(normalizeItem);gameItems=allItems.filter(x=>x.kind==='ITEM');moneyT=allItems.find(x=>x.kind==='TMONEY')||null;services=rows(SHEETS.services).filter(x=>x.id&&x.name).map(normalizeService);Object.assign(result,{seals,gameItems,moneyT,services,stockUpdatedAt:stockUpdatedAt()});}
+  if(needs('dashboard','analytics','reports','orders','customers','automation')){orders=rows(SHEETS.orders);const reversed=orders.slice().reverse();result.orders=reversed.filter(x=>!x.deletedAt).slice(0,500);if(needs('orders')){result.deletedOrders=actor&&['OWNER','ADMIN'].includes(actor.role)?reversed.filter(x=>!!x.deletedAt).slice(0,500):[];result.orderItems=rowsTail(SHEETS.orderItems,5000).reverse();}}
+  if(needs('dashboard','customers','automation')){customers=rows(SHEETS.customers);result.customers=customers.slice().reverse().slice(0,1500);}
+  if(needs('dashboard','promotions'))result.promotions=rows(SHEETS.promotions).map(normalizePromotion);
+  if(needs('inventory'))result.stockLogs=rowsTail(SHEETS.stockLogs,500).reverse();
+  if(needs('customers'))result.customerInteractions=rowsTail(SHEETS.customerInteractions,3000).reverse();
+  if(needs('trash'))result.trash=rowsTail(SHEETS.trash,1000).reverse();
+  if(needs('logs'))result.logs=rowsTail(SHEETS.logs,300).reverse();
+  if(needs('automation'))result.automation=getAutomationData(actor,{seals,gameItems:gameItems.concat(moneyT?[moneyT]:[]),orders:orders.filter(x=>!x.deletedAt),customers,settings});
+  return result;
 }
 function normalizeSeal(x){return{...x,kind:'SEAL',price:number(x.price),packSize:number(x.packSize)||1,stock:x.stock===''?'':number(x.stock),reservedStock:number(x.reservedStock),lowStockAlert:number(x.lowStockAlert),costPrice:x.costPrice===''?'':number(x.costPrice),sortOrder:number(x.sortOrder),aliases:splitAliases(x.aliases)};}
 function normalizeItem(x){const money=String(x.id)===MONEY_T_PRODUCT_ID||String(x.itemCategory||'').toUpperCase()===MONEY_T_CATEGORY;return{...x,kind:money?'TMONEY':'ITEM',price:number(x.price),unit:money?'T':x.unit,stock:x.stock===''?'':number(x.stock),reservedStock:number(x.reservedStock),lowStockAlert:number(x.lowStockAlert),costPrice:x.costPrice===''?'':number(x.costPrice),sortOrder:number(x.sortOrder),aliases:splitAliases(x.aliases)};}
@@ -517,8 +528,8 @@ function sortCatalog(s,headers,kind){
   s.getRange(2,1,s.getLastRow()-1,s.getLastColumn()).sort(sort);
 }
 function saveSettings(settingsObj,actor){return withLock(()=>{
-  const s=sheet(SHEETS.settings,HEADERS.settings),values=s.getDataRange().getValues(),rowByKey=new Map();for(let i=1;i<values.length;i++)rowByKey.set(String(values[i][0]),i+1);
-  Object.keys(settingsObj||{}).forEach(k=>{const row=rowByKey.get(k);if(!row){s.appendRow([k,settingsObj[k],'']);rowByKey.set(k,s.getLastRow());}else s.getRange(row,2).setValue(settingsObj[k]);});if(Object.prototype.hasOwnProperty.call(settingsObj||{},'sessionDays'))PropertiesService.getScriptProperties().setProperty('SESSION_DAYS',String(settingsObj.sessionDays));
+  const s=sheet(SHEETS.settings,HEADERS.settings),values=s.getDataRange().getValues(),rowByKey=new Map(),categoryDiscountKeys=new Set(['categoryDiscountSealPercent','categoryDiscountItemPercent','categoryDiscountServicePercent']);for(let i=1;i<values.length;i++)rowByKey.set(String(values[i][0]),i+1);
+  Object.keys(settingsObj||{}).forEach(k=>{const value=categoryDiscountKeys.has(k)?Math.max(0,Math.min(100,number(settingsObj[k]))):settingsObj[k],row=rowByKey.get(k);if(!row){s.appendRow([k,value,'']);rowByKey.set(k,s.getLastRow());}else s.getRange(row,2).setValue(value);});if(Object.prototype.hasOwnProperty.call(settingsObj||{},'sessionDays'))PropertiesService.getScriptProperties().setProperty('SESSION_DAYS',String(settingsObj.sessionDays));
   log('SETTINGS','SYSTEM','','',actor||'SYSTEM');return output({ok:true});
 });}
 function productSaleUnit(product){return String(product.unit||((product.kind||'')==='SEAL'?'ชุด':(product.kind||'')==='TMONEY'?'T':'ชิ้น'));}
@@ -528,10 +539,18 @@ function catalogSnapshot(){
   [['SEAL',SHEETS.seals,HEADERS.seals],['ITEM',SHEETS.items,HEADERS.items],['SERVICE',SHEETS.services,HEADERS.services]].forEach(([baseKind,name,headers])=>{const s=sheet(name,headers),v=s.getDataRange().getValues(),h=v[0].map(String);for(let i=1;i<v.length;i++){const data=Object.fromEntries(h.map((k,j)=>[k,v[i][j]]));if(!data.id)continue;const kind=baseKind==='ITEM'&&(String(data.id)===MONEY_T_PRODUCT_ID||String(data.itemCategory||'').toUpperCase()===MONEY_T_CATEGORY)?'TMONEY':baseKind;if(kind==='TMONEY')data.unit='T';map.set(kind+'|'+data.id,{kind,s,row:i+1,headers:h,data});}});return map;
 }
 function promotionActive(p,now){const start=p.startAt?new Date(p.startAt).getTime():0,end=p.endAt?new Date(p.endAt).getTime():0;return String(p.status||'ACTIVE')==='ACTIVE'&&(!start||now>=start)&&(!end||now<=end);}
-function calculateServerPricing(items,promotions){
-  const subtotal=items.reduce((sum,x)=>sum+number(x.lineTotal),0),sealSubtotal=items.filter(x=>String(x.kind)==='SEAL').reduce((sum,x)=>sum+number(x.lineTotal),0),now=Date.now();let discount=0;const applied=[],active=promotions.filter(p=>promotionActive(p,now)).sort((a,b)=>number(a.priority||999)-number(b.priority||999));
-  for(const p of active){const promotionBase=p.type==='REWARD_PER_SPEND'?sealSubtotal:subtotal;if(promotionBase<number(p.minSpend))continue;let amount=0;if(p.type==='DISCOUNT_PERCENT'||p.type==='FLASH_SALE')amount=subtotal*Math.max(0,Math.min(100,number(p.value)))/100;else if(p.type==='DISCOUNT_AMOUNT')amount=Math.min(subtotal,Math.max(0,number(p.value)));if(amount>0){discount+=amount;applied.push({promotionId:p.promotionId,name:p.name,type:p.type,amount});}else if(p.type==='REWARD_PER_SPEND')applied.push({promotionId:p.promotionId,name:p.name,type:p.type,amount:0,eligibleSubtotal:sealSubtotal,rewardSets:Math.floor(sealSubtotal/(number(p.minSpend)||100))});if(String(p.stackable)==='FALSE')break;}
-  discount=Math.min(subtotal,discount);return{subtotal,sealSubtotal,discount,total:Math.max(0,subtotal-discount),applied};
+function roundMoney(value){return Math.round((number(value)+Number.EPSILON)*100)/100;}
+function categoryDiscountPricing(items,settings){
+  const definitions=[['SEAL','ซีล','categoryDiscountSealPercent'],['ITEM','ไอเทม','categoryDiscountItemPercent'],['SERVICE','เซอร์วิส','categoryDiscountServicePercent']];
+  const subtotals={SEAL:0,ITEM:0,SERVICE:0};
+  (items||[]).forEach(item=>{const kind=String(item.kind||'').toUpperCase(),category=kind==='TMONEY'?'ITEM':kind;if(Object.prototype.hasOwnProperty.call(subtotals,category))subtotals[category]+=number(item.lineTotal);});
+  const categories=definitions.map(([category,label,key])=>{const subtotal=roundMoney(subtotals[category]),percent=Math.max(0,Math.min(100,number((settings||{})[key]))),amount=roundMoney(subtotal*percent/100);return{category,label,subtotal,percent,amount};});
+  return{categories,total:roundMoney(categories.reduce((sum,x)=>sum+x.amount,0))};
+}
+function calculateServerPricing(items,promotions,settings){
+  const subtotal=roundMoney(items.reduce((sum,x)=>sum+number(x.lineTotal),0)),sealSubtotal=roundMoney(items.filter(x=>String(x.kind)==='SEAL').reduce((sum,x)=>sum+number(x.lineTotal),0)),categoryPricing=categoryDiscountPricing(items,settings),now=Date.now();let promotionDiscount=0;const applied=[],active=promotions.filter(p=>promotionActive(p,now)).sort((a,b)=>number(a.priority||999)-number(b.priority||999));
+  for(const p of active){const promotionBase=p.type==='REWARD_PER_SPEND'?sealSubtotal:subtotal;if(promotionBase<number(p.minSpend))continue;let amount=0;if(p.type==='DISCOUNT_PERCENT'||p.type==='FLASH_SALE')amount=roundMoney(subtotal*Math.max(0,Math.min(100,number(p.value)))/100);else if(p.type==='DISCOUNT_AMOUNT')amount=Math.min(subtotal,Math.max(0,number(p.value)));if(amount>0){promotionDiscount+=amount;applied.push({promotionId:p.promotionId,name:p.name,type:p.type,amount});}else if(p.type==='REWARD_PER_SPEND')applied.push({promotionId:p.promotionId,name:p.name,type:p.type,amount:0,eligibleSubtotal:sealSubtotal,rewardSets:Math.floor(sealSubtotal/(number(p.minSpend)||100))});if(String(p.stackable)==='FALSE')break;}
+  promotionDiscount=roundMoney(Math.min(subtotal,promotionDiscount));const categoryDiscountTotal=categoryPricing.total,discount=roundMoney(Math.min(subtotal,categoryDiscountTotal+promotionDiscount));return{subtotal,sealSubtotal,categoryDiscounts:categoryPricing.categories,categoryDiscountTotal,promotionDiscount,discount,total:roundMoney(Math.max(0,subtotal-discount)),applied};
 }
 function findRequest(requestId){return rows(SHEETS.orderRequests).find(x=>String(x.requestId)===String(requestId));}
 function uniqueOrderId(existing){for(let i=0;i<8;i++){const now=new Date(),suffix=Utilities.getUuid().replace(/-/g,'').slice(0,8).toUpperCase(),id='GUN-'+Utilities.formatDate(now,Session.getScriptTimeZone(),'yyyyMMdd-HHmmss')+'-'+suffix;if(!existing.has(id))return id;}throw Error('ไม่สามารถสร้างเลขออเดอร์ได้ กรุณาลองใหม่');}
@@ -560,14 +579,14 @@ function createOrder(b){return withLock(()=>{
   const raw=Array.isArray(b.items)?b.items:[];if(!raw.length)throw Error('ไม่มีสินค้าในออเดอร์');if(raw.length>100)throw Error('รายการสินค้าเกินกำหนด');
   const grouped=new Map();raw.forEach(x=>{const kind=String(x.kind||'').toUpperCase();if(!['SEAL','ITEM','SERVICE','TMONEY'].includes(kind))throw Error('ประเภทสินค้าไม่ถูกต้อง');const id=String(x.id||''),qty=Number(x.quantity),max=kind==='TMONEY'?1000000000:9999;if(!id||id.length>160||!Number.isFinite(qty)||!Number.isInteger(qty)||qty<1||qty>max)throw Error('จำนวนสินค้าไม่ถูกต้อง');const key=kind+'|'+id;grouped.set(key,(grouped.get(key)||0)+qty);});
   const catalog=catalogSnapshot(),normalized=[];grouped.forEach((qty,key)=>{const found=catalog.get(key),max=found&&found.kind==='TMONEY'?1000000000:9999;if(qty>max)throw Error('จำนวนสินค้าเกินกำหนด');if(!found)throw Error('ไม่พบสินค้าในฐานข้อมูล');const p=found.data,status=String(p.status||'ACTIVE');if(['OUT_OF_STOCK','INACTIVE','HIDDEN'].includes(status))throw Error(String(p.name)+' ไม่พร้อมขาย');const stock=p.stock===''?'':number(p.stock),reserved=Math.max(0,number(p.reservedStock)),available=stock===''?'':stock-reserved;if(found.kind!=='SERVICE'&&available!==''&&qty>available)throw Error('สต๊อก '+String(p.name)+' ไม่พอ (พร้อมขาย '+available+')');const price=Math.max(0,number(p.price)),unit=productSaleUnit({...p,kind:found.kind}),packSize=unit==='ชุด'?(number(p.packSize)||1000):'';normalized.push({orderItemId:'OI-'+Utilities.getUuid(),kind:found.kind,productId:p.id,productName:p.name,quantity:qty,unit,unitPrice:price,lineTotal:price*qty,pickStatus:'UNCHECKED',stockCheck:available===''?'CHECK':'OK',packSize,_found:found,_stock:stock,_reserved:reserved});});
-  const pricing=calculateServerPricing(normalized,rows(SHEETS.promotions).map(normalizePromotion)),now=new Date(),existingIds=new Set(rows(SHEETS.orders).map(x=>String(x.orderId))),id=uniqueOrderId(existingIds),promo=Math.floor(pricing.sealSubtotal/(number(settings.promoThreshold)||100));
+  const pricing=calculateServerPricing(normalized,rows(SHEETS.promotions).map(normalizePromotion),settings),now=new Date(),existingIds=new Set(rows(SHEETS.orders).map(x=>String(x.orderId))),id=uniqueOrderId(existingIds),promo=Math.floor(pricing.sealSubtotal/(number(settings.promoThreshold)||100));
   const orderSheet=sheet(SHEETS.orders,HEADERS.orders),itemSheet=sheet(SHEETS.orderItems,HEADERS.orderItems),requestSheet=sheet(SHEETS.orderRequests,HEADERS.orderRequests),stockSnapshots=[];let itemsWritten=false,orderWritten=false,requestWritten=false;
   try{
     normalized.forEach(x=>{if(x.kind==='SERVICE'||x._stock==='')return;const f=x._found,rc=f.headers.indexOf('reservedStock'),next=x._reserved+x.quantity;if(next>x._stock)throw Error('สต๊อกไม่พอสำหรับ '+x.productName);stockSnapshots.push({s:f.s,row:f.row,col:rc+1,value:x._reserved,item:x});f.s.getRange(f.row,rc+1).setValue(next);});
     const publicItems=normalized.map(x=>({orderItemId:x.orderItemId,orderId:id,kind:x.kind,productId:x.productId,productName:x.productName,quantity:x.quantity,unit:x.unit,unitPrice:x.unitPrice,lineTotal:x.lineTotal,pickStatus:x.pickStatus,stockCheck:x.stockCheck,packSize:x.packSize}));
     if(publicItems.length){itemSheet.getRange(itemSheet.getLastRow()+1,1,publicItems.length,HEADERS.orderItems.length).setValues(publicItems.map(x=>HEADERS.orderItems.map(k=>k==='createdAt'||k==='updatedAt'?now:(x[k]??''))));itemsWritten=true;}
     const order={orderId:id,createdAt:now,tamer:customerText.tamer,server:customerText.server,contact:customerText.contact,itemsJson:JSON.stringify(publicItems),total:pricing.total,promoSets:promo,status:'NEW',adminNote:'',updatedAt:now,requestId,pricingJson:JSON.stringify(pricing),inventoryState:'RESERVED'};orderSheet.appendRow(HEADERS.orders.map(k=>order[k]??''));orderWritten=true;
-    const response={ok:true,orderId:id,total:pricing.total,subtotal:pricing.subtotal,discount:pricing.discount,promoSets:promo,promotions:pricing.applied};requestSheet.appendRow([requestId,now,id,sha256(customer.contact).slice(0,24),'COMPLETED',JSON.stringify(response)]);requestWritten=true;
+    const response={ok:true,orderId:id,total:pricing.total,subtotal:pricing.subtotal,discount:pricing.discount,categoryDiscounts:pricing.categoryDiscounts,categoryDiscountTotal:pricing.categoryDiscountTotal,promotionDiscount:pricing.promotionDiscount,promoSets:promo,promotions:pricing.applied};requestSheet.appendRow([requestId,now,id,sha256(customer.contact).slice(0,24),'COMPLETED',JSON.stringify(response)]);requestWritten=true;
     try{ensureCustomerProfile(customerText,now);stockSnapshots.forEach(x=>writeStockLog(x.item.kind,{id:x.item.productId,name:x.item.productName},x.item._stock,0,x.item._stock,x.item._reserved+x.item.quantity,'ORDER_RESERVE','ORDER '+id,'SYSTEM'));log('ORDER','ORDER',id,customerText.tamer,JSON.stringify({total:pricing.total,promo,items:publicItems.length,requestId}));}catch(logErr){}
     protection.cache.put(protection.cooldownKey,String(Date.now()),protection.cooldown);invalidatePublicCache();return output(response);
   }catch(err){for(let i=stockSnapshots.length-1;i>=0;i--){try{const x=stockSnapshots[i];x.s.getRange(x.row,x.col).setValue(x.value);}catch(rollbackErr){}}try{if(itemsWritten)deleteRowsByValue(itemSheet,1,id);}catch(rollbackErr){}try{if(orderWritten)deleteRowsByValue(orderSheet,0,id);}catch(rollbackErr){}try{if(requestWritten)deleteRowsByValue(requestSheet,0,requestId);}catch(rollbackErr){}throw err;}
