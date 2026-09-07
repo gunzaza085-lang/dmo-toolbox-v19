@@ -23,8 +23,9 @@ function isBrowserClosedError(error) {
   return /target page, context or browser has been closed|browser has been closed|context\.newPage|target closed/i.test(String(error && error.message || error || ''));
 }
 
-function needsReviewError(error) {
-  return isBrowserClosedError(error) ? 'BROWSER_CLOSED_NEEDS_REVIEW' : String(error && error.message || error || 'REAL_EXECUTOR_FAILED').slice(0, 300);
+function needsReviewError(error, commentCreated = false) {
+  const code = isBrowserClosedError(error) ? 'BROWSER_CLOSED_NEEDS_REVIEW' : String(error && error.message || error || 'REAL_EXECUTOR_FAILED').slice(0, 280);
+  return commentCreated && !/NEEDS_REVIEW/.test(code) ? `${code}_AFTER_COMMENT_NEEDS_REVIEW` : code;
 }
 
 module.exports = { RecoveryBackoff, isBrowserClosedError, needsReviewError };

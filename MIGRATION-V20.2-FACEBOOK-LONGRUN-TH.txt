@@ -1,0 +1,38 @@
+GUN SHOP DMO V20.2 — Facebook Long-run / Remote Worker Migration
+
+Database: 3.2.1 → 3.3.0
+
+การเปลี่ยนแปลงแบบ additive:
+- FacebookBumpPosts เพิ่ม runDurationHours, runStartedAt, runUntil
+- ค่าเดิมที่ไม่มีระยะเวลาถือเป็น 0 = ไม่จำกัด จึงไม่ทำให้โพสต์เดิมหายหรือเปลี่ยนรอบเอง
+- Worker ใช้ Pair Token เฉพาะงาน Facebook และเก็บเฉพาะ hash ฝั่ง Apps Script
+- สถานะ PC2 และคำสั่ง Test/Open ส่งผ่าน Apps Script เพื่อให้ BackOffice เครื่องอื่นควบคุมได้
+- Worker เก็บ Pair ไว้ใน local browser profile เพื่อกู้คืนหลัง Restart
+- หาก Pair ถูก revoke หรือ token หมดสภาพ Worker จะล้างเฉพาะ pair file และกลับเป็น unpaired เพื่อให้ BackOffice Pair ใหม่ได้ โดยไม่ลบ Chrome profile/session
+- Worker ใช้ profile-level instance lock เพื่อป้องกัน Worker/Chrome ชุดซ้ำ และล้าง stale lock เมื่อ process เดิมหยุดจริง
+- Worker รายงาน heartbeat แยกจากการ claim งาน จึงไม่แสดง OFFLINE ผิดระหว่าง recovery หรืองานที่ใช้เวลานาน
+- Local Worker รับคำสั่งเปลี่ยนสถานะเฉพาะจาก Origin ที่กำหนด, ปฏิเสธ POST ที่ไม่มี Origin และ endpoint เปิดหน้าไปได้เฉพาะ Facebook
+- Scheduler รักษาเวลารอบเดิม ไม่เลื่อนสะสมตามเวลาที่ Facebook ตอบช้า และข้ามรอบที่เครื่องปิด
+- Scheduler ลบ trigger ซ้ำอัตโนมัติ และ stale PROCESSING จะถูก fail-closed แม้ระบบ Pause/DRY RUN/Facebook หลุด
+- ครบ runUntil แล้ว Server จะ Pause โพสต์และยกเลิก PENDING อัตโนมัติ
+- ผลลัพธ์ไม่แน่นอนหลังส่ง Comment หรือ Worker lease หมดอายุจะ Pause โพสต์เป็น NEEDS_REVIEW ห้าม Retry อัตโนมัติ
+- Cleanup ลบเฉพาะ URL ที่มี comment_id/reply_comment_id และตรวจข้อความ/สิทธิ์ลบ/ผลลบก่อนบันทึก DELETED
+- REAL Worker บันทึก comment_id/ownership/COMPLETED ที่ backend ก่อนลบ Comment เก่า แล้วรายงานผล Cleanup ซ้ำได้แบบ idempotent
+- เมื่อลบโพสต์ History ของโพสต์นั้นจะไม่แสดงใน BackOffice แต่ audit row เดิมยังเก็บไว้
+- ห้ามลบโพสต์ระหว่างงาน PROCESSING เพื่อไม่ให้ Comment จริงที่กำลังส่งหลุดจาก ownership/history
+- ค่าเริ่มต้นของระบบใหม่คือ DRY RUN + Pause All; โพสต์ใหม่ disabled และ Scheduler ต้องเปิดด้วยผู้ดูแลเท่านั้น
+- Settings key ที่ซ้ำจากข้อมูลเก่าจะใช้ค่า canonical แถวแรกและการบันทึกครั้งถัดไปจะปรับทุกแถวให้ตรงกัน
+
+ลำดับ Deploy ที่ปลอดภัย:
+1. Pause All และปิด Scheduler ก่อน พร้อมสำรอง Production Sheet
+2. Deploy Apps Script 3.3.0 ก่อน เพื่อเพิ่ม schema และ worker-token endpoint
+3. อัปเดตไฟล์ Worker บน PC2 แล้วตรวจว่ามี Worker/Chrome profile ชุดเดียว
+4. เปิด Worker และ Pair ใหม่จาก PC2 หนึ่งครั้ง เพื่อสร้าง worker-pair.json รุ่นใหม่
+5. ตรวจ heartbeat ฝั่ง BackOffice จากอีกเครื่อง: ONLINE / RUNNING / CONNECTED / PAIRED
+6. Deploy หน้า GitHub Pages และตรวจ cache version longrun-1
+7. ทำ DRY RUN และ Restart recovery ก่อน
+8. REAL Manual Test ต้องมีคำยืนยันแยกต่างหาก แล้วตรวจ comment_id, attempts, History, Owned Comment, Duplicate และ Queue
+9. เปิด Scheduler จริงหลัง Manual/Restart PASS เท่านั้น
+
+ห้าม Deploy frontend ก่อน Apps Script/Worker รุ่นใหม่ เพราะหน้าเว็บ Remote Worker ต้องใช้ endpoint ใหม่
+ห้ามคัดลอก worker-pair.json, Chrome profile, cookie, password หรือ token เข้า Git/GitHub/Google Sheet

@@ -130,13 +130,45 @@ class FacebookPageAdapter {
           href = selectNewVerifiedReference(beforeReferences, [this.page.url(), ...afterReferences]);
           if (!href) await this.page.waitForTimeout(500);
         }
-        return { ok: true, externalCommentId: href || stableReference(`${this.page.url()}|${text}|${Date.now()}`), verifiedReference: Boolean(href) };
+        if (!href) throw Error('COMMENT_REFERENCE_UNVERIFIED_NEEDS_REVIEW');
+        return { ok: true, externalCommentId: href, verifiedReference: true };
       }
     }
-    throw Error('COMMENT_SUBMIT_TIMEOUT');
+    throw Error('COMMENT_SUBMIT_TIMEOUT_NEEDS_REVIEW');
   }
 
-  async deleteOwnedComment(reference) {
+  async visibleAction(scopes, roles, name, timeoutMs = 7000) {
+    const deadline = Date.now() + timeoutMs;
+    do {
+      for (const scope of scopes) {
+        for (const role of roles) {
+          const candidates = scope.getByRole(role, { name });
+          const count = await candidates.count().catch(() => 0);
+          for (let index = count - 1; index >= 0; index -= 1) {
+            const candidate = candidates.nth(index);
+            if (await candidate.isVisible().catch(() => false)) return candidate;
+          }
+        }
+      }
+      if (Date.now() < deadline) await this.page.waitForTimeout(250);
+    } while (Date.now() < deadline);
+    return null;
+  }
+
+  async commentLink(commentId) {
+    const links = this.page.locator('a[href*="comment_id="], a[href*="reply_comment_id="]');
+    for (let index = 0; index < await links.count(); index += 1) {
+      const candidate = links.nth(index);
+      const href = await candidate.getAttribute('href');
+      try {
+        const candidateUrl = new URL(href, FACEBOOK_HOME);
+        if ((candidateUrl.searchParams.get('comment_id') || candidateUrl.searchParams.get('reply_comment_id')) === commentId) return candidate;
+      } catch {}
+    }
+    return null;
+  }
+
+  async deleteOwnedComment(reference, expectedMessage = '') {
     const value = String(reference || '');
     if (!value || value.startsWith('UNVERIFIED-')) return { ok: false, code: 'OWNERSHIP_NOT_VERIFIABLE' };
     const url = new URL(value, FACEBOOK_HOME);
@@ -145,25 +177,41 @@ class FacebookPageAdapter {
     await this.page.goto(url.href, { waitUntil: 'domcontentloaded', timeout: 45000 });
     const state = await this.connectionState();
     if (state !== 'CONNECTED') throw Error(state);
-    await this.page.waitForTimeout(1200);
-    const links = this.page.locator('a[href*="comment_id="], a[href*="reply_comment_id="]');
-    let link = null;
-    for (let index = 0; index < await links.count(); index += 1) {
-      const candidate = links.nth(index);
-      const href = await candidate.getAttribute('href');
-      try { const candidateUrl = new URL(href, FACEBOOK_HOME); if ((candidateUrl.searchParams.get('comment_id') || candidateUrl.searchParams.get('reply_comment_id')) === commentId) { link = candidate; break; } } catch {}
-    }
+    await this.page.waitForTimeout(1800);
+    const link = await this.commentLink(commentId);
     if (!link) return { ok: false, code: 'OWNED_COMMENT_NOT_FOUND' };
     const article = link.locator('xpath=ancestor::*[@role="article"][1]');
-    const menu = article.getByRole('button', { name: /actions|menu|การดำเนินการ|ตัวเลือก|แก้ไข\s*หรือ\s*ลบ|ลบนี้/i }).last();
-    if (!await menu.count()) return { ok: false, code: 'DELETE_MENU_NOT_FOUND' };
+    if (!await article.count()) return { ok: false, code: 'OWNED_COMMENT_ARTICLE_NOT_FOUND' };
+    if (expectedMessage) {
+      const text = String(await article.innerText().catch(() => '') || '');
+      if (!text.split('\n').some((line) => line.trim() === String(expectedMessage).trim())) return { ok: false, code: 'OWNED_COMMENT_MESSAGE_MISMATCH' };
+    }
+    const buttons = article.locator('button,[role="button"]');
+    let menu = null;
+    for (let index = await buttons.count() - 1; index >= 0; index -= 1) {
+      const candidate = buttons.nth(index);
+      if (!await candidate.isVisible().catch(() => false)) continue;
+      const label = `${await candidate.getAttribute('aria-label') || ''} ${await candidate.getAttribute('title') || ''}`;
+      const popup = String(await candidate.getAttribute('aria-haspopup') || '').toLowerCase();
+      if (popup === 'menu' || /actions|menu|การดำเนินการ|ตัวเลือก|แก้ไข\s*หรือ\s*ลบ|ลบนี้|เพิ่มเติม/i.test(label)) { menu = candidate; break; }
+    }
+    if (!menu) return { ok: false, code: 'DELETE_MENU_NOT_FOUND' };
     await menu.click();
-    const remove = this.page.getByRole('button', { name: /^(?:delete|ลบ)$/i }).last();
-    try { await remove.waitFor({ state: 'visible', timeout: 5000 }); } catch { return { ok: false, code: 'DELETE_ACTION_NOT_FOUND' }; }
+    const actionName = /^(?:delete|ลบ)(?:\s+(?:comment|ความคิดเห็น|รายการนี้))?$/i;
+    const remove = await this.visibleAction([this.page], ['menuitem', 'button'], actionName);
+    if (!remove) return { ok: false, code: 'DELETE_ACTION_NOT_FOUND' };
     await remove.click();
-    const confirm = this.page.getByRole('button', { name: /delete|ลบ/i }).last();
-    try { await confirm.waitFor({ state: 'visible', timeout: 5000 }); await confirm.click(); } catch {}
-    return { ok: true, code: 'DELETED' };
+    const dialog = this.page.getByRole('dialog').last();
+    const confirm = await this.visibleAction([dialog, this.page], ['button'], actionName);
+    if (!confirm) {
+      try { await article.waitFor({ state: 'detached', timeout: 3000 }); return { ok: true, code: 'DELETED' }; } catch { return { ok: false, code: 'DELETE_CONFIRM_NOT_FOUND' }; }
+    }
+    await confirm.click();
+    try { await article.waitFor({ state: 'detached', timeout: 10000 }); return { ok: true, code: 'DELETED' }; } catch {}
+    await this.page.reload({ waitUntil: 'domcontentloaded', timeout: 45000 });
+    await this.page.waitForTimeout(1200);
+    const found = Boolean(await this.commentLink(commentId));
+    return found ? { ok: false, code: 'DELETE_NOT_CONFIRMED' } : { ok: true, code: 'DELETED' };
   }
 }
 

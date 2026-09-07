@@ -6,26 +6,41 @@ const path = require('path');
 const { chromium } = require('playwright-core');
 const { FACEBOOK_HOME, FacebookPageAdapter, classifyFacebookUrl } = require('./facebook-page');
 const { RecoveryBackoff, isBrowserClosedError, needsReviewError } = require('./recovery');
+const { acquireInstanceLock } = require('./instance-lock');
+const { createPairingStore, validApiUrl, validWorkerToken } = require('./pairing-store');
 
 const HOST = '127.0.0.1';
 const PORT = Number(process.env.FACEBOOK_WORKER_PORT || 17821);
 const BACKEND_TIMEOUT_MS = Number(process.env.FACEBOOK_WORKER_BACKEND_TIMEOUT_MS || 45000);
+const POLL_INTERVAL_MS = Math.max(15000, Number(process.env.FACEBOOK_WORKER_POLL_MS || 30000));
+const HEARTBEAT_INTERVAL_MS = Math.max(15000, Number(process.env.FACEBOOK_WORKER_HEARTBEAT_MS || 30000));
 const LEGACY_PROFILE_DIR = path.resolve(__dirname, '..', '.facebook-worker-profile');
 const PORTABLE_PROFILE_DIR = process.env.LOCALAPPDATA
   ? path.join(process.env.LOCALAPPDATA, 'GUN-SHOP-DMO', 'FacebookWorkerProfile')
   : LEGACY_PROFILE_DIR;
 const PROFILE_DIR = path.resolve(process.env.FACEBOOK_WORKER_PROFILE_DIR || (fs.existsSync(LEGACY_PROFILE_DIR) ? LEGACY_PROFILE_DIR : PORTABLE_PROFILE_DIR));
-const ALLOWED_ORIGINS = new Set((process.env.WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io,http://127.0.0.1:4173').split(',').map((item) => item.trim()).filter(Boolean));
+const PAIRING_FILE = path.join(PROFILE_DIR, 'worker-pair.json');
+const INSTANCE_LOCK_FILE = path.join(PROFILE_DIR, 'worker-instance.lock');
+const ALLOWED_ORIGINS = new Set((process.env.WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io,http://127.0.0.1:4173,http://localhost:4173').split(',').map((item) => item.trim()).filter(Boolean));
+let instanceLock;
+try { instanceLock = acquireInstanceLock(INSTANCE_LOCK_FILE); }
+catch (error) { console.error(String(error && error.message || error)); process.exit(1); }
+const pairingStore = createPairingStore(PAIRING_FILE);
+process.once('exit', () => instanceLock.release());
 
 let context = null;
 let page = null;
-let paired = null;
+let paired = pairingStore.load();
 let running = false;
+let activeJobId = '';
 let lastError = '';
 let lastClaimReason = '';
 let lastClaimAt = '';
 let timer = null;
 let healthTimer = null;
+let heartbeatTimer = null;
+let lastStatusReportAt = 0;
+let lastConnection = 'DISCONNECTED';
 let account = { name: '', identifier: '', checkedAt: '' };
 let browserLaunchPromise = null;
 let intentionalBrowserClose = false;
@@ -36,8 +51,9 @@ const recoveryBackoff = new RecoveryBackoff({
 });
 
 function publicStatus(connection = 'DISCONNECTED') {
+  lastConnection = String(connection || lastConnection || 'DISCONNECTED');
   const browserRunning = Boolean(context && page && !page.isClosed());
-  return { ok: true, worker: 'ONLINE', browser: browserRunning ? 'RUNNING' : 'STOPPED', connection, paired: Boolean(paired), running, lastError, lastClaimReason, lastClaimAt, workerPid: process.pid, browserProfile: path.basename(PROFILE_DIR), recovery: { failures: recoveryBackoff.failures, retryInMs: recoveryBackoff.remainingMs() }, account: { ...account }, lastChecked: new Date().toISOString() };
+  return { ok: true, worker: 'ONLINE', browser: browserRunning ? 'RUNNING' : 'STOPPED', connection: browserRunning ? lastConnection : 'DISCONNECTED', paired: Boolean(paired), running: Boolean(activeJobId), lastError, lastClaimReason, lastClaimAt, workerPid: process.pid, browserProfile: path.basename(PROFILE_DIR), recovery: { failures: recoveryBackoff.failures, retryInMs: recoveryBackoff.remainingMs() }, account: { ...account }, lastChecked: new Date().toISOString() };
 }
 
 async function refreshAccountIdentity(adapter) {
@@ -125,12 +141,11 @@ async function connectionStatus() {
   return publicStatus(connection);
 }
 
-async function apiPost(payload) {
-  if (!paired) throw Error('WORKER_NOT_PAIRED');
+async function backendPost(apiUrl, token, payload) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
   try {
-    const response = await fetch(paired.apiUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...payload, token: paired.token }), signal: controller.signal });
+    const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...payload, token }), signal: controller.signal });
     const data = await response.json();
     if (!data.ok) throw Error(data.error || 'BACKEND_REQUEST_FAILED');
     return data;
@@ -138,6 +153,35 @@ async function apiPost(payload) {
     if (error && error.name === 'AbortError') throw Error('BACKEND_TIMEOUT');
     throw error;
   } finally { clearTimeout(timeout); }
+}
+
+async function apiPost(payload) {
+  if (!paired) throw Error('WORKER_NOT_PAIRED');
+  try { return await backendPost(paired.apiUrl, paired.token, payload); }
+  catch (error) {
+    if (/WORKER_PAIR_REQUIRED/.test(String(error && error.message || error))) {
+      paired = null;
+      pairingStore.forget();
+    }
+    throw error;
+  }
+}
+
+async function reportRemoteHeartbeat(force = false) {
+  if (!paired || (!force && Date.now() - lastStatusReportAt < HEARTBEAT_INTERVAL_MS)) return;
+  await apiPost({ action: 'reportFacebookWorkerStatus', workerStatus: publicStatus(lastConnection) });
+  lastStatusReportAt = Date.now();
+}
+
+async function establishPairing(apiUrl, adminToken) {
+  if (!validApiUrl(apiUrl) || !adminToken) throw Error('INVALID_PAIRING');
+  const result = await backendPost(String(apiUrl), String(adminToken), { action: 'pairFacebookWorker', workerId: process.env.COMPUTERNAME || 'PC2' });
+  if (!validWorkerToken(result.workerToken)) throw Error('INVALID_WORKER_TOKEN');
+  const next = { apiUrl: String(apiUrl), token: String(result.workerToken) };
+  pairingStore.persist(next);
+  paired = next;
+  schedule();
+  return next;
 }
 
 async function finishJob(action, payload) {
@@ -148,23 +192,34 @@ async function finishJob(action, payload) {
   throw error;
 }
 
+async function executeRemoteCommand(command, adapter) {
+  if (!command || !command.id) return null;
+  if (command.command === 'OPEN_FACEBOOK') return openFacebookPage(FACEBOOK_HOME, { focus: false });
+  if (command.command === 'TEST') {
+    const connection = await refreshAccountIdentity(adapter);
+    if (connection === 'CONNECTED') lastError = '';
+    return publicStatus(connection);
+  }
+  throw Error('REMOTE_COMMAND_NOT_ALLOWED');
+}
+
 async function processOnce() {
   if (!paired || running) return;
   let adapter;
   try { adapter = await ensureBrowser(); }
-  catch (error) { lastError = String(error && error.message || error).slice(0, 300); return; }
+  catch (error) { lastError = String(error && error.message || error).slice(0, 300); await reportRemoteHeartbeat(true).catch(() => {}); return; }
   let connection = await adapter.connectionState();
   if (connection === 'INVALID') {
     const opened = await openFacebookPage(FACEBOOK_HOME);
     connection = opened.connection;
     adapter = new FacebookPageAdapter(page);
   }
-  if (connection !== 'CONNECTED') { lastError = connection; return; }
   running = true;
   try {
     let claim;
     try {
-      claim = await apiPost({ action: 'claimFacebookBumpJob' });
+      claim = await apiPost({ action: 'claimFacebookBumpJob', workerStatus: publicStatus(connection) });
+      lastStatusReportAt = Date.now();
       lastClaimReason = claim.job ? 'CLAIMED' : String(claim.reason || 'NO_JOB');
     } catch (error) {
       lastClaimReason = `ERROR:${String(error && error.message || error).slice(0, 200)}`;
@@ -172,27 +227,50 @@ async function processOnce() {
     } finally {
       lastClaimAt = new Date().toISOString();
     }
+    if (claim.command) {
+      try {
+        const status = await executeRemoteCommand(claim.command, adapter);
+        await finishJob('completeFacebookWorkerCommand', { commandId: claim.command.id, ok: true, workerStatus: status || await connectionStatus() });
+        lastError = '';
+      } catch (error) {
+        lastError = String(error && error.message || error).slice(0, 300);
+        await finishJob('completeFacebookWorkerCommand', { commandId: claim.command.id, ok: false, error: lastError, workerStatus: await connectionStatus() });
+      }
+      return;
+    }
+    if (connection !== 'CONNECTED') { lastError = connection; return; }
     if (!claim.job) return;
     const { job, previousOwnedComment, cleanupOld } = claim;
+    activeJobId = String(job.jobId || '');
+    let created = null;
+    let jobCompleted = false;
     try {
       await adapter.openPost(job.postUrl);
-      const created = await adapter.submitComment(job.message);
-      let cleanupResult = 'SKIPPED';
-      let previousCommentId = '';
+      created = await adapter.submitComment(job.message);
+      const previousCommentId = cleanupOld && previousOwnedComment ? previousOwnedComment.externalCommentId || '' : '';
+      let cleanupResult = previousCommentId ? 'PENDING' : 'SKIPPED';
+      await finishJob('completeFacebookBumpJob', { jobId: job.jobId, externalCommentId: created.externalCommentId, message: job.message, cleanupResult });
+      jobCompleted = true;
       if (cleanupOld && previousOwnedComment) {
-        previousCommentId = previousOwnedComment.externalCommentId || '';
-        const cleanup = await adapter.deleteOwnedComment(previousCommentId);
-        cleanupResult = cleanup.ok ? 'DELETED' : `CLEANUP_FAILED:${cleanup.code}`;
+        try {
+          const cleanup = await adapter.deleteOwnedComment(previousCommentId, previousOwnedComment.message || '');
+          cleanupResult = cleanup.ok ? 'DELETED' : `CLEANUP_FAILED:${cleanup.code}`;
+        } catch (error) {
+          cleanupResult = `CLEANUP_FAILED:${needsReviewError(error)}`;
+          if (isBrowserClosedError(error)) { await invalidateBrowser(error); recoveryBackoff.failure(); }
+        }
+        try { await finishJob('completeFacebookBumpJob', { jobId: job.jobId, externalCommentId: created.externalCommentId, cleanupResult, previousCommentId }); }
+        catch (error) { lastError = `CLEANUP_REPORT_FAILED:${String(error && error.message || error).slice(0, 260)}`; return; }
       }
-      await finishJob('completeFacebookBumpJob', { jobId: job.jobId, externalCommentId: created.externalCommentId, message: job.message, cleanupResult, previousCommentId });
-      lastError = '';
+      lastError = cleanupResult.indexOf('CLEANUP_FAILED:')===0 ? cleanupResult : '';
     } catch (error) {
-      const code = needsReviewError(error);
+      if (jobCompleted) { lastError = `POST_COMPLETE_CLEANUP_ERROR:${String(error && error.message || error).slice(0, 260)}`; return; }
+      const code = needsReviewError(error, Boolean(created));
       lastError = code;
       if (isBrowserClosedError(error)) { await invalidateBrowser(error); recoveryBackoff.failure(); }
-      await finishJob('failFacebookBumpJob', { jobId: job.jobId, error: code });
+      await finishJob('failFacebookBumpJob', { jobId: job.jobId, error: code, externalCommentId: created && created.externalCommentId || '' });
     }
-  } finally { running = false; }
+  } finally { activeJobId = ''; running = false; }
 }
 
 async function maintainBrowser() {
@@ -213,14 +291,18 @@ async function maintainBrowser() {
 
 function schedule() {
   clearInterval(timer);
-  timer = setInterval(() => processOnce().catch((error) => { lastError = String(error && error.message || error).slice(0, 300); }), 15000);
+  clearInterval(heartbeatTimer);
+  timer = setInterval(() => processOnce().catch((error) => { lastError = String(error && error.message || error).slice(0, 300); }), POLL_INTERVAL_MS);
+  heartbeatTimer = setInterval(() => reportRemoteHeartbeat().catch(() => {}), HEARTBEAT_INTERVAL_MS);
+  setTimeout(() => processOnce().catch((error) => { lastError = String(error && error.message || error).slice(0, 300); }), 250);
+  setTimeout(() => reportRemoteHeartbeat().catch(() => {}), 500);
 }
 
 function cors(req, res) {
   const origin = req.headers.origin || '';
-  const loopbackOrigin = /^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/.test(origin);
   const localPairNavigation = req.method === 'POST' && req.url === '/pair-browser' && origin === 'null';
-  if (origin && !ALLOWED_ORIGINS.has(origin) && !loopbackOrigin && !localPairNavigation) return false;
+  if (!origin && req.method !== 'GET') return false;
+  if (origin && !ALLOWED_ORIGINS.has(origin) && !localPairNavigation) return false;
   if (origin) res.setHeader('Access-Control-Allow-Origin', origin);
   if (req.headers['access-control-request-private-network'] === 'true') res.setHeader('Access-Control-Allow-Private-Network', 'true');
   res.setHeader('Vary', 'Origin');
@@ -248,17 +330,25 @@ const server = http.createServer(async (req, res) => {
     const body = await readBody(req);
     if (req.method === 'POST' && req.url === '/connect') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(FACEBOOK_HOME,{focus:true}))); }
     if (req.method === 'POST' && req.url === '/test') { browserAutoRecoveryEnabled = true; const adapter = await ensureBrowser({ force: true, focus: true }); const connection = await refreshAccountIdentity(adapter); if (connection === 'CONNECTED') lastError = ''; return res.end(JSON.stringify(publicStatus(connection))); }
-    if (req.method === 'POST' && req.url === '/open') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(body.url || FACEBOOK_HOME,{focus:true}))); }
-    if (req.method === 'POST' && req.url === '/pair-browser') { if (!/^https:\/\/script\.google\.com\/macros\/s\//.test(String(body.apiUrl || '')) || !body.token) throw Error('INVALID_PAIRING'); browserAutoRecoveryEnabled = true; let current=await connectionStatus();if(current.connection!=='CONNECTED')current=await openFacebookPage(FACEBOOK_HOME,{focus:true});if(current.connection==='CONNECTED'){paired={apiUrl:String(body.apiUrl),token:String(body.token)};schedule();} return pairBridgeResponse(res,await connectionStatus()); }
-    if (req.method === 'POST' && req.url === '/pair') { if (!/^https:\/\/script\.google\.com\/macros\/s\//.test(String(body.apiUrl || '')) || !body.token) throw Error('INVALID_PAIRING'); paired = { apiUrl: String(body.apiUrl), token: String(body.token) }; schedule(); return res.end(JSON.stringify(await connectionStatus())); }
-    if (req.method === 'POST' && req.url === '/disconnect') { paired = null; running = false; clearInterval(timer); timer = null; browserAutoRecoveryEnabled = false; intentionalBrowserClose = true; if (context) await context.close(); context = null; page = null; recoveryBackoff.success(); return res.end(JSON.stringify(publicStatus('DISCONNECTED'))); }
+    if (req.method === 'POST' && req.url === '/open') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(FACEBOOK_HOME,{focus:true}))); }
+    if (req.method === 'POST' && req.url === '/pair-browser') { if (!validApiUrl(body.apiUrl) || !body.token) throw Error('INVALID_PAIRING'); browserAutoRecoveryEnabled = true; let current=await connectionStatus();if(current.connection!=='CONNECTED')current=await openFacebookPage(FACEBOOK_HOME,{focus:true});if(current.connection==='CONNECTED')await establishPairing(body.apiUrl,body.token); return pairBridgeResponse(res,await connectionStatus()); }
+    if (req.method === 'POST' && req.url === '/pair') { await establishPairing(body.apiUrl,body.token); return res.end(JSON.stringify(await connectionStatus())); }
+    if (req.method === 'POST' && req.url === '/disconnect') { if(paired)await apiPost({action:'disconnectFacebookWorker'}).catch(()=>{}); paired = null; pairingStore.forget(); running = false; activeJobId = ''; clearInterval(timer); clearInterval(heartbeatTimer); timer = null; heartbeatTimer = null; browserAutoRecoveryEnabled = false; intentionalBrowserClose = true; if (context) await context.close(); context = null; page = null; recoveryBackoff.success(); return res.end(JSON.stringify(publicStatus('DISCONNECTED'))); }
     res.writeHead(404); return res.end(JSON.stringify({ ok: false, error: 'NOT_FOUND' }));
   } catch (error) { lastError = String(error && error.message || error).slice(0, 300); res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: lastError })); }
 });
 
 server.listen(PORT, HOST, () => {
   console.log(`Facebook worker ready at http://${HOST}:${PORT}`);
+  if (paired) schedule();
   healthTimer = setInterval(() => maintainBrowser(), 15000);
   maintainBrowser();
 });
-process.on('SIGINT', async () => { clearInterval(healthTimer); if (context) await context.close(); process.exit(0); });
+server.on('error', (error) => {
+  if (error && error.code === 'EADDRINUSE') console.error(`Facebook worker is already running at http://${HOST}:${PORT}`);
+  else console.error(String(error && error.stack || error));
+  process.exitCode = 1;
+});
+async function shutdown() { clearInterval(timer); clearInterval(healthTimer); clearInterval(heartbeatTimer); intentionalBrowserClose = true; if (context) await context.close().catch(() => {}); process.exit(0); }
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);

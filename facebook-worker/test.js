@@ -1,8 +1,13 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const { COMMENT_LABELS, classifyFacebookUrl, selectNewVerifiedReference, stableReference } = require('./facebook-page');
 const { RecoveryBackoff, isBrowserClosedError, needsReviewError } = require('./recovery');
+const { acquireInstanceLock } = require('./instance-lock');
+const { createPairingStore } = require('./pairing-store');
 
 assert.equal(classifyFacebookUrl('https://www.facebook.com/'), 'CONNECTED');
 assert.equal(classifyFacebookUrl('https://www.facebook.com/login/'), 'LOGIN_REQUIRED');
@@ -34,4 +39,40 @@ assert.equal(backoff.failures, 0);
 assert.equal(backoff.canAttempt(0), true);
 assert.equal(isBrowserClosedError(Error('browserContext.newPage: Target page, context or browser has been closed')), true);
 assert.equal(needsReviewError(Error('Target closed')), 'BROWSER_CLOSED_NEEDS_REVIEW');
-console.log('Facebook worker tests: 26/26 PASS');
+assert.equal(needsReviewError(Error('BACKEND_TIMEOUT'), true), 'BACKEND_TIMEOUT_AFTER_COMMENT_NEEDS_REVIEW');
+const lockTestDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dmo-worker-lock-'));
+const lockTestFile = path.join(lockTestDir, 'worker.lock');
+try {
+  const firstLock = acquireInstanceLock(lockTestFile);
+  assert.equal(fs.existsSync(lockTestFile), true);
+  assert.throws(() => acquireInstanceLock(lockTestFile), /WORKER_ALREADY_RUNNING/);
+  firstLock.release();
+  assert.equal(fs.existsSync(lockTestFile), false);
+  fs.writeFileSync(lockTestFile, JSON.stringify({ pid: 999999, token: 'stale' }), 'utf8');
+  const recoveredLock = acquireInstanceLock(lockTestFile, { isProcessAlive: () => false });
+  assert.equal(fs.existsSync(lockTestFile), true);
+  recoveredLock.release();
+  assert.equal(fs.existsSync(lockTestFile), false);
+} finally {
+  try { fs.unlinkSync(lockTestFile); } catch {}
+  try { fs.rmdirSync(lockTestDir); } catch {}
+}
+const pairingTestDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dmo-worker-pair-'));
+const pairingTestFile = path.join(pairingTestDir, 'worker-pair.json');
+const pairingApiUrl = 'https://script.google.com/macros/s/test-deployment/exec';
+const firstPair = { apiUrl: pairingApiUrl, token: `fbw_${'a'.repeat(64)}` };
+const secondPair = { apiUrl: pairingApiUrl, token: `fbw_${'b'.repeat(64)}` };
+try {
+  const pairingStore = createPairingStore(pairingTestFile);
+  assert.equal(pairingStore.load(), null);
+  pairingStore.persist(firstPair);
+  assert.deepEqual(createPairingStore(pairingTestFile).load(), firstPair);
+  pairingStore.persist(secondPair);
+  assert.deepEqual(createPairingStore(pairingTestFile).load(), secondPair);
+  pairingStore.forget();
+  assert.equal(pairingStore.load(), null);
+} finally {
+  try { fs.unlinkSync(pairingTestFile); } catch {}
+  try { fs.rmdirSync(pairingTestDir); } catch {}
+}
+console.log('Facebook worker tests: 36/36 PASS');

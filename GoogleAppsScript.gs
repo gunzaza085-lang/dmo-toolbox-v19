@@ -29,7 +29,7 @@ const HEADERS = {
   notifications:['notificationId','createdAt','type','severity','title','message','status','relatedId'],
   orderItems:['orderItemId','orderId','kind','productId','productName','quantity','unit','unitPrice','lineTotal','pickStatus','stockCheck','createdAt','updatedAt','packSize'],
   orderRequests:['requestId','createdAt','orderId','contactHash','status','responseJson'],
-  facebookBumpPosts:['id','name','postUrl','bumpMessage','intervalMinutes','enabled','lastRunAt','nextRunAt','lastStatus','createdAt','updatedAt','deletedAt'],
+  facebookBumpPosts:['id','name','postUrl','bumpMessage','intervalMinutes','enabled','lastRunAt','nextRunAt','lastStatus','createdAt','updatedAt','deletedAt','runDurationHours','runStartedAt','runUntil'],
   facebookBumpQueue:['jobId','targetPostId','postName','postUrl','message','scheduledAt','status','attempts','error','createdAt','updatedAt','source'],
   facebookBumpHistory:['historyId','createdAt','targetPostId','postName','postUrl','action','message','result','commentId','cleanupResult','error','jobId'],
   facebookOwnedComments:['id','targetPostId','externalCommentId','message','createdAt','deletedAt','status']
@@ -44,10 +44,10 @@ const DEFAULT_SETTINGS = {
   themeDefault:'DARK', enablePWA:'TRUE', offlineCacheHours:12, mobileCompact:'TRUE', showMobileBottomNav:'TRUE',
   orderSuccessMessage:'ส่งรายการให้ทางร้านเรียบร้อยแล้ว ทางร้านจะตรวจสอบสต๊อกและจัดรายการให้', orderPrefix:'GUN',
   facebookBumpDefaultInterval:60, facebookBumpDefaultMessage:'+', facebookBumpDelaySeconds:30,
-  facebookBumpCleanupOld:'TRUE', facebookBumpPaused:'FALSE', facebookBumpDryRun:'TRUE', facebookBumpMode:'DRY_RUN', facebookBumpNextJobAllowedAt:''
+  facebookBumpCleanupOld:'TRUE', facebookBumpPaused:'TRUE', facebookBumpDryRun:'TRUE', facebookBumpMode:'DRY_RUN', facebookBumpNextJobAllowedAt:''
 };
 
-const DATABASE_VERSION='3.2.1';
+const DATABASE_VERSION='3.3.0';
 const MONEY_T_PRODUCT_ID='TMONEY-001';
 const MONEY_T_CATEGORY='MONEY_T';
 
@@ -82,12 +82,23 @@ function doPost(e){
     if(body.action==='login')return login(body);
     if(body.action==='createOrder'){ensureDatabase();return createOrder(body);}
     if(body.action==='logout') return logout(body.token);
+    const facebookWorkerActions=['reportFacebookWorkerStatus','claimFacebookBumpJob','completeFacebookWorkerCommand','completeFacebookBumpJob','failFacebookBumpJob','disconnectFacebookWorker'];
+    if(facebookWorkerActions.includes(body.action)){
+      ensureDatabase();
+      const workerActor=facebookBumpRequireWorker(body.token);
+      if(body.action==='reportFacebookWorkerStatus')return reportFacebookWorkerStatus(body,workerActor);
+      if(body.action==='claimFacebookBumpJob')return claimFacebookBumpJob(body,workerActor);
+      if(body.action==='completeFacebookWorkerCommand')return completeFacebookWorkerCommand(body,workerActor);
+      if(body.action==='completeFacebookBumpJob')return completeFacebookBumpJob(body,workerActor);
+      if(body.action==='failFacebookBumpJob')return failFacebookBumpJob(body,workerActor);
+      return disconnectFacebookWorker(body,workerActor);
+    }
     ensureDatabase();
     const session=getSession(body.token,true);
     if(!session) throw Error('กรุณาเข้าสู่ระบบใหม่');
     const actor={userId:String(session.userId),role:String(session.role||'VIEWER')};
     if(PUBLIC_CACHE_MUTATIONS.includes(body.action))invalidatePublicCache();
-    const adminWriteActions=['upsert','delete','softDelete','restoreTrash','permanentDelete','bulkUpdate','saveSettings','uploadImage','previewImageZip','applyImageZip','importWikiImage','attachWikiMetadata','upsertPromotion','deletePromotion','createBackup','restoreBackup','setupBackupTrigger','deleteBackup','saveSecurityUser','adjustStock','setStock','syncStock','markOrderSpam','saveFacebookBumpPost','deleteFacebookBumpPost','toggleFacebookBumpPost','queueFacebookBumpNow','cancelFacebookBumpJob','retryFacebookBumpJob','saveFacebookBumpSettings','pauseAllFacebookBumps','resumeAllFacebookBumps','ensureFacebookBumpTrigger','disableFacebookBumpTrigger','claimFacebookBumpJob','completeFacebookBumpJob','failFacebookBumpJob'];
+    const adminWriteActions=['upsert','delete','softDelete','restoreTrash','permanentDelete','bulkUpdate','saveSettings','uploadImage','previewImageZip','applyImageZip','importWikiImage','attachWikiMetadata','upsertPromotion','deletePromotion','createBackup','restoreBackup','setupBackupTrigger','deleteBackup','saveSecurityUser','adjustStock','setStock','syncStock','markOrderSpam','saveFacebookBumpPost','deleteFacebookBumpPost','toggleFacebookBumpPost','queueFacebookBumpNow','cancelFacebookBumpJob','retryFacebookBumpJob','saveFacebookBumpSettings','pauseAllFacebookBumps','resumeAllFacebookBumps','ensureFacebookBumpTrigger','disableFacebookBumpTrigger','queueFacebookWorkerCommand','pairFacebookWorker','revokeFacebookWorkerPair'];
     const staffWriteActions=['updateOrder','updateOrderItemPick','updateCustomer','addCustomerInteraction'];
     if(adminWriteActions.includes(body.action)) requireRole(body.token,['OWNER','ADMIN']);
     if(staffWriteActions.includes(body.action)) requireRole(body.token,['OWNER','ADMIN','STAFF']);
@@ -138,9 +149,9 @@ function doPost(e){
       case'resumeAllFacebookBumps': return setFacebookBumpGlobalPause(false,body,actor);
       case'ensureFacebookBumpTrigger': return ensureFacebookBumpTriggerAction(body,actor);
       case'disableFacebookBumpTrigger': return disableFacebookBumpTriggerAction(body,actor);
-      case'claimFacebookBumpJob': return claimFacebookBumpJob(body,actor);
-      case'completeFacebookBumpJob': return completeFacebookBumpJob(body,actor);
-      case'failFacebookBumpJob': return failFacebookBumpJob(body,actor);
+      case'queueFacebookWorkerCommand': return queueFacebookWorkerCommand(body,actor);
+      case'pairFacebookWorker': return pairFacebookWorker(body,actor);
+      case'revokeFacebookWorkerPair': return revokeFacebookWorkerPair(body,actor);
       case'initialize': return output({ok:true,message:'ฐานข้อมูลพร้อมใช้งาน'});
       default: throw Error('ไม่รู้จักคำสั่ง');
     }

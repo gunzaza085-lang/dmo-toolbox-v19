@@ -5,7 +5,8 @@
   "scripts": {
     "facebook-worker": "node facebook-worker/worker.js",
     "test-server": "node facebook-worker/dev-server.js",
-    "test:facebook-worker": "node facebook-worker/test.js"
+    "test:facebook-worker": "node facebook-worker/test.js",
+    "test": "node facebook-worker/test.js && node tests/facebook_bump_dry_run.js && node tests/v20_1_audit.js && node tests/password_hash_compat.js"
   },
   "dependencies": {
     "playwright-core": "^1.55.0"
