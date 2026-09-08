@@ -77,6 +77,15 @@ test('Duplicate Settings rows cannot override the first canonical safety value',
   assert(settings.paused===true&&settings.mode==='DRY_RUN','later duplicate Settings rows overrode safe canonical values');
 });
 
+test('Fast Settings reads preserve native Boolean safety flags',()=>{
+  const settings=api.facebookBumpSettings([
+    {key:'facebookBumpPaused',value:true},
+    {key:'facebookBumpCleanupOld',value:true},
+    {key:'facebookBumpMode',value:'DRY_RUN'}
+  ]);
+  assert(settings.paused===true&&settings.cleanupOld===true,'native Boolean TRUE was coerced to a number');
+});
+
 test('Long-duration schedule stays exact for one month and stops before runUntil',()=>{
   const start=new Date('2026-09-01T00:00:00.000Z'),runUntil=new Date(start.getTime()+30*24*3600000),scheduled=new Date(start.getTime()+30*60000),postRecord={...post('MONTH'),runUntil,intervalMinutes:30,nextRunAt:scheduled};
   let due=scheduled,count=0;
