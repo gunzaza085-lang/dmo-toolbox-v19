@@ -57,7 +57,7 @@ function facebookBumpWriteRow(name,record){
 }
 
 function facebookBumpAppend(name,record){facebookBumpWriteRow(name,record);return record;}
-function facebookBumpBoolean(value){return value===true||String(value).toUpperCase()==='TRUE';}
+function facebookBumpBoolean(value){return value===true||value===1||String(value).toUpperCase()==='TRUE'||String(value)==='1';}
 function facebookBumpDateValue(value){const time=value instanceof Date?value.getTime():new Date(value||0).getTime();return Number.isFinite(time)?time:0;}
 function facebookBumpIso(value){const time=facebookBumpDateValue(value);return time?new Date(time).toISOString():'';}
 function facebookBumpNextRunAt(base,intervalMinutes){return new Date(facebookBumpDateValue(base||new Date())+Math.max(1,number(intervalMinutes)||60)*60000);}
