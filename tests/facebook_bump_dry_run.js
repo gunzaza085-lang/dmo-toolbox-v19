@@ -95,6 +95,14 @@ test('Google Sheets numeric checkbox values preserve safety flags',()=>{
   assert(settings.paused===true&&settings.cleanupOld===true,'numeric checkbox TRUE was treated as disabled');
 });
 
+test('Admin status reads safety settings through display values',()=>{
+  const start=moduleSource.indexOf('function getFacebookBumpData');
+  const end=moduleSource.indexOf('function queueFacebookWorkerCommand',start);
+  const source=moduleSource.slice(start,end);
+  assert(source.includes('const settings=facebookBumpSettings()'),'Admin status bypasses the canonical display-value settings reader');
+  assert(!source.includes('facebookBumpSettings(facebookBumpReadRowsFast(SHEETS.settings))'),'Admin status still uses the lossy fast Settings reader');
+});
+
 test('Long-duration schedule stays exact for one month and stops before runUntil',()=>{
   const start=new Date('2026-09-01T00:00:00.000Z'),runUntil=new Date(start.getTime()+30*24*3600000),scheduled=new Date(start.getTime()+30*60000),postRecord={...post('MONTH'),runUntil,intervalMinutes:30,nextRunAt:scheduled};
   let due=scheduled,count=0;

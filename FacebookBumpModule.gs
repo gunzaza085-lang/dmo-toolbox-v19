@@ -137,7 +137,7 @@ function getFacebookBumpData(actor){
   const visiblePostIds=new Set(posts.map(post=>String(post.id)));
   const queue=facebookBumpReadRowsFast(SHEETS.facebookBumpQueue).sort((a,b)=>facebookBumpDateValue(b.createdAt)-facebookBumpDateValue(a.createdAt)).slice(0,300);
   const history=facebookBumpReadRowsFast(SHEETS.facebookBumpHistory).filter(item=>visiblePostIds.has(String(item.targetPostId))).sort((a,b)=>facebookBumpDateValue(b.createdAt)-facebookBumpDateValue(a.createdAt)).slice(0,500);
-  const settings=facebookBumpSettings(facebookBumpReadRowsFast(SHEETS.settings));return{posts:posts.map(facebookBumpPublicRecord),queue:queue.map(facebookBumpPublicRecord),history:history.map(facebookBumpPublicRecord),settings,triggerActive:facebookBumpTriggerActive(),mode:settings.mode,workerStatus:facebookBumpWorkerStatus(),workerCommand:facebookBumpPublicWorkerCommand(facebookBumpWorkerCommand())};
+  const settings=facebookBumpSettings();return{posts:posts.map(facebookBumpPublicRecord),queue:queue.map(facebookBumpPublicRecord),history:history.map(facebookBumpPublicRecord),settings,triggerActive:facebookBumpTriggerActive(),mode:settings.mode,workerStatus:facebookBumpWorkerStatus(),workerCommand:facebookBumpPublicWorkerCommand(facebookBumpWorkerCommand())};
 }
 
 function queueFacebookWorkerCommand(body,actor){return withLock(()=>{
