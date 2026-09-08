@@ -17,7 +17,7 @@ const HEARTBEAT_INTERVAL_MS = Math.max(15000, Number(process.env.FACEBOOK_WORKER
 const PROFILE_DIR = portableProfileDir();
 const PAIRING_FILE = path.join(PROFILE_DIR, 'worker-pair.json');
 const INSTANCE_LOCK_FILE = path.join(PROFILE_DIR, 'worker-instance.lock');
-const ALLOWED_ORIGINS = new Set((process.env.WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io').split(',').map((item) => item.trim()).filter(Boolean));
+const ALLOWED_ORIGINS = new Set((process.env.WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io,https://shop-dmo.github.io').split(',').map((item) => item.trim()).filter(Boolean));
 let instanceLock;
 try { instanceLock = acquireInstanceLock(INSTANCE_LOCK_FILE); }
 catch (error) { console.error(String(error && error.message || error)); process.exit(1); }
@@ -312,10 +312,10 @@ function readBody(req) {
   return new Promise((resolve, reject) => { let body = ''; req.on('data', (chunk) => { body += chunk; if (body.length > 200000) reject(Error('REQUEST_TOO_LARGE')); }); req.on('end', () => { try { const contentType=String(req.headers['content-type']||'').toLowerCase();resolve(!body?{}:contentType.startsWith('application/x-www-form-urlencoded')?Object.fromEntries(new URLSearchParams(body)):JSON.parse(body)); } catch { reject(Error('INVALID_BODY')); } }); req.on('error', reject); });
 }
 
-function pairBridgeResponse(res, status) {
+function pairBridgeResponse(res, status, targetOrigin = 'https://gunzaza085-lang.github.io') {
   const payload=JSON.stringify({ type: 'DMO_FACEBOOK_PAIR_RESULT', status }).replace(/</g,'\\u003c');
   res.setHeader('Content-Type','text/html;charset=utf-8');
-  return res.end(`<!doctype html><meta charset="utf-8"><title>DMO Facebook Pair</title><p>Pairing complete. This window will close automatically.</p><script>if(window.opener)window.opener.postMessage(${payload},'https://gunzaza085-lang.github.io');setTimeout(()=>window.close(),400);<\/script>`);
+  return res.end(`<!doctype html><meta charset="utf-8"><title>DMO Facebook Pair</title><p>Pairing complete. This window will close automatically.</p><script>if(window.opener)window.opener.postMessage(${payload},${JSON.stringify(targetOrigin)});setTimeout(()=>window.close(),400);<\/script>`);
 }
 
 const server = http.createServer(async (req, res) => {
@@ -328,7 +328,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/connect') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(FACEBOOK_HOME,{focus:true}))); }
     if (req.method === 'POST' && req.url === '/test') { browserAutoRecoveryEnabled = true; const adapter = await ensureBrowser({ force: true, focus: true }); const connection = await refreshAccountIdentity(adapter); if (connection === 'CONNECTED') lastError = ''; return res.end(JSON.stringify(publicStatus(connection))); }
     if (req.method === 'POST' && req.url === '/open') { browserAutoRecoveryEnabled = true; return res.end(JSON.stringify(await openFacebookPage(FACEBOOK_HOME,{focus:true}))); }
-    if (req.method === 'POST' && req.url === '/pair-browser') { if (!validApiUrl(body.apiUrl) || !body.token) throw Error('INVALID_PAIRING'); browserAutoRecoveryEnabled = true; let current=await connectionStatus();if(current.connection!=='CONNECTED')current=await openFacebookPage(FACEBOOK_HOME,{focus:true});if(current.connection==='CONNECTED')await establishPairing(body.apiUrl,body.token); return pairBridgeResponse(res,await connectionStatus()); }
+    if (req.method === 'POST' && req.url === '/pair-browser') { const appOrigin=String(body.appOrigin||'https://gunzaza085-lang.github.io');if (!validApiUrl(body.apiUrl) || !body.token || !ALLOWED_ORIGINS.has(appOrigin)) throw Error('INVALID_PAIRING'); browserAutoRecoveryEnabled = true; let current=await connectionStatus();if(current.connection!=='CONNECTED')current=await openFacebookPage(FACEBOOK_HOME,{focus:true});if(current.connection==='CONNECTED')await establishPairing(body.apiUrl,body.token); return pairBridgeResponse(res,await connectionStatus(),appOrigin); }
     if (req.method === 'POST' && req.url === '/pair') { await establishPairing(body.apiUrl,body.token); return res.end(JSON.stringify(await connectionStatus())); }
     if (req.method === 'POST' && req.url === '/disconnect') { if(paired)await apiPost({action:'disconnectFacebookWorker'}).catch(()=>{}); paired = null; pairingStore.forget(); running = false; activeJobId = ''; clearInterval(timer); clearInterval(heartbeatTimer); timer = null; heartbeatTimer = null; browserAutoRecoveryEnabled = false; intentionalBrowserClose = true; if (context) await context.close(); context = null; page = null; recoveryBackoff.success(); return res.end(JSON.stringify(publicStatus('DISCONNECTED'))); }
     res.writeHead(404); return res.end(JSON.stringify({ ok: false, error: 'NOT_FOUND' }));

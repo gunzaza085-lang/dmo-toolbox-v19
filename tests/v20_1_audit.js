@@ -204,10 +204,10 @@ check('31. Category discount settings UI and additive migration', () => {
     assert(gas.includes(`${key}:0`),`DEFAULT_SETTINGS ขาด ${key}`);
     assert(api.PUBLIC_SETTING_FIELDS.includes(key),`Public settings ขาด ${key}`);
   });
-  assert(gas.includes("DATABASE_VERSION+'-gate-a-4'"),'schema gate ไม่ได้บังคับ seed Settings ใหม่แบบ additive');
+  assert(gas.includes("DATABASE_VERSION+'-gate-a-5'"),'schema gate ไม่ได้บังคับ seed Settings ใหม่แบบ additive');
   assert(gas.includes("setNumberFormat('0.##')"),'เซลล์ส่วนลดอาจสืบรูปแบบวันที่จาก Settings แถวก่อนหน้า');
   const settingsSource=app.slice(app.indexOf('function adminSettingsBase'),app.indexOf('function adminLogs'));
-  const settingsContext={state:{adminData:{settings:{categoryDiscountSealPercent:5,categoryDiscountItemPercent:10,categoryDiscountServicePercent:0},security:{actor:{role:'OWNER'}}}},shopIdentity:()=>({shopName:'',ownerName:''}),html:value=>String(value),String};
+  const settingsContext={state:{adminData:{settings:{categoryDiscountSealPercent:5,categoryDiscountItemPercent:10,categoryDiscountServicePercent:0},security:{actor:{role:'OWNER'}}}},shopIdentity:()=>({shopName:'',ownerName:''}),configuredSettingText:(settings,key,fallback)=>Object.prototype.hasOwnProperty.call(settings,key)?String(settings[key]??''):fallback,settingEnabled:(settings,key,fallback=true)=>Object.prototype.hasOwnProperty.call(settings,key)?settings[key]!==false&&String(settings[key]).toUpperCase()!=='FALSE':fallback,DEFAULT_ORDER_COPY_TEMPLATE:'{title}\n{items}\n{pricing}\n{promotions}\n{customer}\n{notice}',html:value=>String(value),String};
   vm.createContext(settingsContext);
   new vm.Script(`${settingsSource};globalThis.__settingsHtml=adminSettings();`).runInContext(settingsContext);
   ['setCategoryDiscountSeal','setCategoryDiscountItem','setCategoryDiscountService'].forEach(id=>assert(settingsContext.__settingsHtml.includes(`id="${id}"`),`ฟอร์มขาด ${id}`));
@@ -228,7 +228,7 @@ check('32. Admin scoped loading and large-list performance', () => {
   assert(!ordersSource.includes('itemRows.filter('), 'หน้าออเดอร์ยัง scan Order Items ซ้ำต่อออเดอร์');
   ['adminOrderVisible','adminCatalogVisible','inventoryVisible','customerVisible'].forEach(key=>assert(app.includes(key),`ไม่มี batch limit: ${key}`));
   ['loadMoreOrdersBtn','loadMoreAdminCatalogBtn','loadMoreInventoryBtn','loadMoreCustomersBtn'].forEach(id=>assert(app.includes(id),`ไม่มีปุ่มแสดงเพิ่ม: ${id}`));
-  assert(read('index.html').includes('20260908-v20.2-longrun-performance-2')&&read('sw.js').includes('gun-shop-dmo-v20-2-longrun-performance-2'),'PWA cache version ยังไม่ตรงกับ combined long-run/performance build');
+  assert(read('index.html').includes('20260908-v20.2-longrun-ux-dynamic-1')&&read('sw.js').includes('gun-shop-dmo-v20-2-longrun-ux-dynamic-1'),'PWA cache version ยังไม่ตรงกับ combined long-run/UX/performance build');
 });
 
 [
