@@ -53,6 +53,7 @@ test('dashboard scope avoids large order/customer payloads',()=>{
   assert(readAdmin.includes('settingRows=existingRows(SHEETS.settings)')&&readAdmin.includes('userRows=existingRows(SHEETS.users)')&&readAdmin.includes('systemRows=existingRows(SHEETS.system)'),'admin base data still repeats schema validation reads');
   assert(app.includes("if(state.page==='admin'){state.loading=false;render();if(state.adminToken)loadAdmin(false);}else loadData(true)"),'direct admin route still waits for storefront data');
   assert(app.includes("state.adminToken?state.settings:{shopName:'GUN SHOP DMO',ownerName:''}"),'direct admin login leaks the legacy fallback owner identity');
+  assert(gas.includes('parts=cache.getAll(keys)'),'public cache still reads every catalog chunk as a separate Apps Script service call');
 });
 
 test('storefront subcategory navigation is prominent and accessible',()=>{

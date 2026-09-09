@@ -400,7 +400,7 @@ function publicProduct(product){const out=pickFields(product,PUBLIC_PRODUCT_FIEL
 function publicSettings(){const all={};existingRows(SHEETS.settings).forEach(x=>{if(PUBLIC_SETTING_FIELDS.includes(String(x.key)))all[x.key]=smart(x.value);});return all;}
 function publicPromotion(p){return pickFields(p,PUBLIC_PROMOTION_FIELDS);}
 function invalidatePublicCache(){const cache=CacheService.getScriptCache(),meta=Number(cache.get(PUBLIC_CACHE_KEY+'-count')||0),keys=[PUBLIC_CACHE_KEY+'-count'];for(let i=0;i<meta;i++)keys.push(PUBLIC_CACHE_KEY+'-'+i);cache.removeAll(keys);}
-function getCachedPublic(){const cache=CacheService.getScriptCache(),count=Number(cache.get(PUBLIC_CACHE_KEY+'-count')||0);if(!count)return null;let json='';for(let i=0;i<count;i++){const part=cache.get(PUBLIC_CACHE_KEY+'-'+i);if(part===null)return null;json+=part;}try{return JSON.parse(json);}catch(e){return null;}}
+function getCachedPublic(){const cache=CacheService.getScriptCache(),count=Number(cache.get(PUBLIC_CACHE_KEY+'-count')||0);if(!count)return null;const keys=Array.from({length:count},(_,i)=>PUBLIC_CACHE_KEY+'-'+i),parts=cache.getAll(keys);let json='';for(const key of keys){if(parts[key]===undefined)return null;json+=parts[key];}try{return JSON.parse(json);}catch(e){return null;}}
 function putCachedPublic(data){const cache=CacheService.getScriptCache(),json=JSON.stringify(data),size=30000,count=Math.ceil(json.length/size),entries={};entries[PUBLIC_CACHE_KEY+'-count']=String(count);for(let i=0;i<count;i++)entries[PUBLIC_CACHE_KEY+'-'+i]=json.slice(i*size,(i+1)*size);cache.putAll(entries,20);}
 function readPublic(){
   const cached=getCachedPublic();if(cached)return cached;
