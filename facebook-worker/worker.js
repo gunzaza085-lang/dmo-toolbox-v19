@@ -26,7 +26,8 @@ const PAIRING_FILE = path.join(PROFILE_DIR, 'worker-pair.json');
 const INSTANCE_LOCK_FILE = path.join(PROFILE_DIR, 'worker-instance.lock');
 const TELEMETRY_FILE = path.join(PROFILE_DIR, 'worker-telemetry.jsonl');
 const RESULT_STORE_FILE = path.join(PROFILE_DIR, 'worker-results.json');
-const ALLOWED_ORIGINS = new Set((process.env.WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io').split(',').map((item) => item.trim()).filter(Boolean));
+const DEFAULT_ALLOWED_ORIGINS = ['https://gunzaza085-lang.github.io', 'https://shop-dmo.github.io'];
+const ALLOWED_ORIGINS = new Set((process.env.WORKER_ALLOWED_ORIGINS || DEFAULT_ALLOWED_ORIGINS.join(',')).split(',').map((item) => item.trim()).filter(Boolean));
 let instanceLock;
 try { instanceLock = acquireInstanceLock(INSTANCE_LOCK_FILE); }
 catch (error) { console.error(String(error && error.message || error)); process.exit(1); }
@@ -416,8 +417,9 @@ function readBody(req) {
 
 function pairBridgeResponse(res, status) {
   const payload=JSON.stringify({ type: 'DMO_FACEBOOK_PAIR_RESULT', status }).replace(/</g,'\\u003c');
+  const targets=JSON.stringify([...ALLOWED_ORIGINS]);
   res.setHeader('Content-Type','text/html;charset=utf-8');
-  return res.end(`<!doctype html><meta charset="utf-8"><title>DMO Facebook Pair</title><p>Pairing complete. This window will close automatically.</p><script>if(window.opener)window.opener.postMessage(${payload},'https://gunzaza085-lang.github.io');setTimeout(()=>window.close(),400);<\/script>`);
+  return res.end(`<!doctype html><meta charset="utf-8"><title>DMO Facebook Pair</title><p>Pairing complete. This window will close automatically.</p><script>if(window.opener)${targets}.forEach(function(origin){window.opener.postMessage(${payload},origin);});setTimeout(()=>window.close(),400);<\/script>`);
 }
 
 const server = http.createServer(async (req, res) => {

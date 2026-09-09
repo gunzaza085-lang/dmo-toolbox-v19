@@ -271,7 +271,7 @@ test('Worker uses one persistent browser and can focus an existing window',()=>{
   assert(worker.includes("openFacebookPage(FACEBOOK_HOME,{focus:true})")&&worker.includes("ensureBrowser({ force: true, focus: true })"),'explicit browser actions cannot focus the worker window');
   assert(worker.includes("worker: 'ONLINE'")&&worker.includes("browser: browserRunning ? 'RUNNING' : 'STOPPED'"),'worker/browser status missing');
   assert(worker.includes('BACKEND_TIMEOUT_MS')&&backendClientSource.includes('AbortController'),'stalled backend request recovery missing');
-  assert(worker.includes("WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io'")&&!worker.includes('loopbackOrigin'),'worker CORS trusts a non-production origin by default');
+  assert(worker.includes("DEFAULT_ALLOWED_ORIGINS = ['https://gunzaza085-lang.github.io', 'https://shop-dmo.github.io']")&&worker.includes('WORKER_ALLOWED_ORIGINS || DEFAULT_ALLOWED_ORIGINS.join')&&!worker.includes('loopbackOrigin'),'worker CORS trusts an unexpected origin by default');
   assert(worker.includes("if (!origin && req.method !== 'GET') return false"),'unauthenticated no-origin POST requests are still accepted');
   assert(worker.includes("req.url === '/open')")&&worker.includes('openFacebookPage(FACEBOOK_HOME,{focus:true})')&&!worker.includes('openFacebookPage(body.url || FACEBOOK_HOME'),'local open endpoint can navigate the Facebook profile to an arbitrary origin');
   assert(frontend.includes("targetAddressSpace:'local'"),'Production fetch does not request local-network access');
