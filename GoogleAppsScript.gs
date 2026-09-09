@@ -4,7 +4,7 @@
  * - Admin: Dashboard, calculator, catalog, orders, settings, logs
  * - DMO Wiki Seal Master image gallery + import to Google Drive
  */
-const SHEETS = { seals:'Seals', items:'Items', services:'Services', settings:'Settings', orders:'Orders', logs:'Logs', stockLogs:'StockLogs', stockRequests:'StockRequests', imageRequests:'ImageRequests', customers:'Customers', promotions:'Promotions', promotionProducts:'PromotionProducts', system:'System', trash:'Trash', wikiCache:'WikiCache', customerInteractions:'CustomerInteractions', reportSettings:'ReportSettings', users:'Users', sessions:'Sessions', backups:'Backups', notifications:'Notifications', orderItems:'OrderItems', orderRequests:'OrderRequests', facebookBumpPosts:'FacebookBumpPosts', facebookBumpQueue:'FacebookBumpQueue', facebookBumpHistory:'FacebookBumpHistory', facebookOwnedComments:'FacebookOwnedComments' };
+const SHEETS = { seals:'Seals', items:'Items', services:'Services', settings:'Settings', orders:'Orders', logs:'Logs', stockLogs:'StockLogs', stockRequests:'StockRequests', imageRequests:'ImageRequests', customers:'Customers', promotions:'Promotions', promotionProducts:'PromotionProducts', system:'System', trash:'Trash', wikiCache:'WikiCache', customerInteractions:'CustomerInteractions', reportSettings:'ReportSettings', users:'Users', sessions:'Sessions', backups:'Backups', notifications:'Notifications', orderItems:'OrderItems', orderRequests:'OrderRequests', facebookBumpPosts:'FacebookBumpPosts', facebookBumpQueue:'FacebookBumpQueue', facebookBumpHistory:'FacebookBumpHistory', facebookOwnedComments:'FacebookOwnedComments', facebookBumpTelemetry:'FacebookBumpTelemetry' };
 const HEADERS = {
   seals:['id','name','aliases','category','section','price','unit','packSize','status','stock','note','imageUrl','wikiName','badge','sortOrder','updatedAt','reservedStock','lowStockAlert','costPrice','wikiTitle','wikiUrl','wikiImageSource','tags','searchKeywords','wikiSyncedAt'],
   items:['id','name','aliases','itemCategory','price','unit','status','stock','note','description','imageUrl','badge','sortOrder','updatedAt','reservedStock','lowStockAlert','costPrice','tags','searchKeywords'],
@@ -30,9 +30,10 @@ const HEADERS = {
   orderItems:['orderItemId','orderId','kind','productId','productName','quantity','unit','unitPrice','lineTotal','pickStatus','stockCheck','createdAt','updatedAt','packSize'],
   orderRequests:['requestId','createdAt','orderId','contactHash','status','responseJson'],
   facebookBumpPosts:['id','name','postUrl','bumpMessage','intervalMinutes','enabled','lastRunAt','nextRunAt','lastStatus','createdAt','updatedAt','deletedAt','runDurationHours','runStartedAt','runUntil'],
-  facebookBumpQueue:['jobId','targetPostId','postName','postUrl','message','scheduledAt','status','attempts','error','createdAt','updatedAt','source'],
+  facebookBumpQueue:['jobId','targetPostId','postName','postUrl','message','scheduledAt','status','attempts','error','createdAt','updatedAt','source','leaseToken','leaseExpiresAt','claimedAt','completedAt','resultFingerprint','reconcileStatus','lastTelemetryAt'],
   facebookBumpHistory:['historyId','createdAt','targetPostId','postName','postUrl','action','message','result','commentId','cleanupResult','error','jobId'],
-  facebookOwnedComments:['id','targetPostId','externalCommentId','message','createdAt','deletedAt','status']
+  facebookOwnedComments:['id','targetPostId','externalCommentId','message','createdAt','deletedAt','status','commentKey','jobId','verifiedAt','verificationMethod'],
+  facebookBumpTelemetry:['eventId','createdAt','jobId','targetPostId','workerId','phase','outcome','detail','durationMs','attempt','leaseToken','externalCommentId']
 };
 const DEFAULT_PRODUCT_SUBCATEGORIES=[
   {id:'SEAL-NORMAL',kind:'SEAL',value:'NORMAL',label:'ปกติ',sortOrder:10,enabled:true},
@@ -59,7 +60,7 @@ const DEFAULT_SETTINGS = {
   facebookBumpCleanupOld:'TRUE', facebookBumpPaused:'TRUE', facebookBumpDryRun:'TRUE', facebookBumpMode:'DRY_RUN', facebookBumpNextJobAllowedAt:''
 };
 
-const DATABASE_VERSION='3.3.0';
+const DATABASE_VERSION='3.3.1';
 const MONEY_T_PRODUCT_ID='TMONEY-001';
 const MONEY_T_CATEGORY='MONEY_T';
 
@@ -94,12 +95,14 @@ function doPost(e){
     if(body.action==='login')return login(body);
     if(body.action==='createOrder'){ensureDatabase();return createOrder(body);}
     if(body.action==='logout') return logout(body.token);
-    const facebookWorkerActions=['reportFacebookWorkerStatus','claimFacebookBumpJob','completeFacebookWorkerCommand','completeFacebookBumpJob','failFacebookBumpJob','disconnectFacebookWorker'];
+    const facebookWorkerActions=['reportFacebookWorkerStatus','reportFacebookBumpTelemetry','claimFacebookBumpJob','renewFacebookBumpJobLease','completeFacebookWorkerCommand','completeFacebookBumpJob','failFacebookBumpJob','disconnectFacebookWorker'];
     if(facebookWorkerActions.includes(body.action)){
       ensureDatabase();
       const workerActor=facebookBumpRequireWorker(body.token);
       if(body.action==='reportFacebookWorkerStatus')return reportFacebookWorkerStatus(body,workerActor);
+      if(body.action==='reportFacebookBumpTelemetry')return reportFacebookBumpTelemetry(body,workerActor);
       if(body.action==='claimFacebookBumpJob')return claimFacebookBumpJob(body,workerActor);
+      if(body.action==='renewFacebookBumpJobLease')return renewFacebookBumpJobLease(body,workerActor);
       if(body.action==='completeFacebookWorkerCommand')return completeFacebookWorkerCommand(body,workerActor);
       if(body.action==='completeFacebookBumpJob')return completeFacebookBumpJob(body,workerActor);
       if(body.action==='failFacebookBumpJob')return failFacebookBumpJob(body,workerActor);

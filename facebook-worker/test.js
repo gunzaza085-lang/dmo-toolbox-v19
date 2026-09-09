@@ -5,11 +5,14 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
-const { COMMENT_LABELS, classifyFacebookUrl, requireVerifiedCommentReference, selectNewVerifiedReference } = require('./facebook-page');
+const { COMMENT_LABELS, buildCommentReference, classifyFacebookUrl, commentKey, graphqlCommentIds, requireVerifiedCommentReference, selectNewVerifiedReference } = require('./facebook-page');
 const { chromeCandidates, findChrome, nodeMajorSupported, portableProfileDir, probeWorkerPort, workerPort } = require('./portable-preflight');
 const { RecoveryBackoff, isBrowserClosedError, needsReviewError } = require('./recovery');
 const { acquireInstanceLock } = require('./instance-lock');
 const { createPairingStore } = require('./pairing-store');
+const { LeaseKeeper } = require('./lease-keeper');
+const { ResultStore } = require('./result-store');
+const { PersistentTelemetry } = require('./telemetry');
 
 let assertions = 0;
 function check(value, message) { assertions += 1; assert(value, message); }
@@ -48,6 +51,10 @@ async function main() {
   equal(requireVerifiedCommentReference(newComment), newComment);
   throws(() => requireVerifiedCommentReference(''), /COMMENT_REFERENCE_UNVERIFIED_NEEDS_REVIEW/);
   throws(() => requireVerifiedCommentReference(nonFacebookComment), /COMMENT_REFERENCE_UNVERIFIED_NEEDS_REVIEW/);
+  equal(commentKey(sameCommentDifferentTracking), '100');
+  equal(buildCommentReference('https://www.facebook.com/groups/1/posts/2/?tracking=old', '10003'), 'https://www.facebook.com/groups/1/posts/2/?comment_id=10003');
+  deepEqual(graphqlCommentIds({ data: { comment_create: { comment: { legacy_fbid: '10004', message: { text: '+' } } } } }, '+'), ['10004']);
+  deepEqual(graphqlCommentIds({ data: { post: { legacy_fbid: '2', message: { text: 'not plus' } } } }, '+'), []);
 
   const backoff = new RecoveryBackoff({ baseDelayMs: 100, maxDelayMs: 400 });
   equal(backoff.canAttempt(0), true);
@@ -63,6 +70,18 @@ async function main() {
   equal(isBrowserClosedError(Error('browserContext.newPage: Target page, context or browser has been closed')), true);
   equal(needsReviewError(Error('Target closed')), 'BROWSER_CLOSED_NEEDS_REVIEW');
   equal(needsReviewError(Error('BACKEND_TIMEOUT'), true), 'BACKEND_TIMEOUT_AFTER_COMMENT_NEEDS_REVIEW');
+
+  let renewals = 0;
+  const lease = new LeaseKeeper({ intervalMs: 100000, safetyMs: 10, renew: async () => ({ leaseExpiresAt: new Date(Date.now() + 60000).toISOString(), count: ++renewals }) });
+  lease.start(new Date(Date.now() + 5).toISOString());
+  equal(await lease.beforeIrreversible(), true);
+  equal(renewals, 1);
+  lease.stop();
+  const failedLease = new LeaseKeeper({ intervalMs: 100000, safetyMs: 1000, renew: async () => { throw Error('NETWORK_DOWN'); } });
+  failedLease.start(new Date(Date.now() + 10).toISOString());
+  let leaseBlocked = false; try { await failedLease.beforeIrreversible(); } catch (error) { leaseBlocked = /NETWORK_DOWN/.test(String(error)); }
+  equal(leaseBlocked, true);
+  failedLease.stop();
 
   equal(nodeMajorSupported('20.0.0'), true);
   equal(nodeMajorSupported('22.9.1'), true);
@@ -126,6 +145,25 @@ async function main() {
   } finally {
     try { fs.unlinkSync(pairingTestFile); } catch {}
     try { fs.rmdirSync(pairingTestDir); } catch {}
+  }
+
+  const reliabilityDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dmo-worker-reliability-'));
+  try {
+    const resultFile = path.join(reliabilityDir, 'results.json');
+    const results = new ResultStore(resultFile);
+    results.put('JOB-1', { state: 'SUBMITTING', leaseToken: 'lease-1' });
+    equal(new ResultStore(resultFile).pending().length, 1);
+    results.put('JOB-1', { state: 'COMMENT_CREATED', externalCommentId: newComment });
+    equal(new ResultStore(resultFile).get('JOB-1').externalCommentId, newComment);
+    results.acknowledge('JOB-1');
+    equal(new ResultStore(resultFile).pending().length, 0);
+    const telemetryFile = path.join(reliabilityDir, 'telemetry.jsonl');
+    const persistent = new PersistentTelemetry(telemetryFile, { maxBytes: 65536 });
+    persistent.append('NETWORK_TIMEOUT', { jobId: 'JOB-1', detail: 'Apps Script timeout' });
+    equal(JSON.parse(fs.readFileSync(telemetryFile, 'utf8').trim()).event, 'NETWORK_TIMEOUT');
+  } finally {
+    for (const name of ['results.json', 'results.json.bak', 'telemetry.jsonl', 'telemetry.jsonl.1']) { try { fs.unlinkSync(path.join(reliabilityDir, name)); } catch {} }
+    try { fs.rmdirSync(reliabilityDir); } catch {}
   }
 
   const root = path.resolve(__dirname, '..');

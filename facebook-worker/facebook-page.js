@@ -29,12 +29,49 @@ function verifiedCommentKey(reference) {
   } catch { return ''; }
 }
 
+function commentKey(value) {
+  const text = String(value || '');
+  if (/^\d+$/.test(text)) return text;
+  return verifiedCommentKey(text);
+}
+
 function selectNewVerifiedReference(beforeReferences, afterReferences) {
   const before = new Set((beforeReferences || []).map(verifiedCommentKey).filter(Boolean));
   return (afterReferences || []).find((reference) => {
     const key = verifiedCommentKey(reference);
     return key && !before.has(key);
   }) || '';
+}
+
+function buildCommentReference(postUrl, id) {
+  const key = commentKey(id);
+  if (!key) return '';
+  const url = new URL(String(postUrl || ''), FACEBOOK_HOME);
+  url.search = '';
+  url.hash = '';
+  url.searchParams.set('comment_id', key);
+  return url.href;
+}
+
+function graphqlCommentIds(value, expectedText) {
+  const found = new Set();
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return false;
+    let containsText = false;
+    Object.entries(node).forEach(([key, child]) => {
+      if ((key === 'text' || key === 'message') && typeof child === 'string' && child.trim() === expectedText) containsText = true;
+      if (walk(child)) containsText = true;
+    });
+    if (containsText) {
+      Object.entries(node).forEach(([key, child]) => {
+        if (typeof child !== 'string' && typeof child !== 'number') return;
+        if ((/comment.*id/i.test(key) || key === 'legacy_fbid') && /^\d{5,}$/.test(String(child))) found.add(String(child));
+      });
+    }
+    return containsText;
+  };
+  walk(value);
+  return [...found];
 }
 
 function requireVerifiedCommentReference(reference) {
@@ -110,33 +147,47 @@ class FacebookPageAdapter {
       .filter(Boolean), String(message));
   }
 
-  async submitComment(message) {
+  async submitComment(message, options = {}) {
     const text = String(message || '').trim();
     if (!text) throw Error('EMPTY_COMMENT');
+    const knownKeys = new Set((options.knownCommentIds || []).map(commentKey).filter(Boolean));
     const before = await this.exactCommentCount(text);
     const beforeReferences = await this.exactCommentReferences(text);
+    beforeReferences.map(commentKey).filter(Boolean).forEach((key) => knownKeys.add(key));
     const input = await this.findCommentInput();
     await input.click();
     await input.fill(text);
+    if (typeof options.beforeSubmit === 'function') await options.beforeSubmit();
+    const graphqlIds = new Set();
+    const onResponse = async (response) => {
+      try {
+        if (!/facebook\.com\/api\/graphql/i.test(response.url()) || response.request().method() !== 'POST' || response.status() >= 400) return;
+        const raw = await response.text();
+        const payload = JSON.parse(raw.replace(/^for\s*\(;;\);\s*/, ''));
+        graphqlCommentIds(payload, text).forEach((id) => { if (!knownKeys.has(id)) graphqlIds.add(id); });
+      } catch {}
+    };
+    this.page.on('response', onResponse);
     await input.press('Enter');
     const deadline = Date.now() + 20000;
-    while (Date.now() < deadline) {
-      await this.page.waitForTimeout(500);
-      const after = await this.exactCommentCount(text);
-      if (after > before) {
-        const referenceDeadline = Date.now() + 5000;
-        let href = '';
-        while (!href && Date.now() < referenceDeadline) {
-          const afterReferences = await this.exactCommentReferences(text);
-          // Facebook may navigate the active page to the newly-created
-          // comment without rendering a permalink inside the article yet.
-          // Treat that URL as a verified candidate so the worker records the
-          // real comment_id instead of falling back to an UNVERIFIED handle.
-          href = selectNewVerifiedReference(beforeReferences, [this.page.url(), ...afterReferences]);
-          if (!href) await this.page.waitForTimeout(500);
+    try {
+      while (Date.now() < deadline) {
+        await this.page.waitForTimeout(500);
+        if (graphqlIds.size === 1) {
+          const href = buildCommentReference(this.page.url(), [...graphqlIds][0]);
+          return { ok: true, externalCommentId: requireVerifiedCommentReference(href), verifiedReference: true, verificationMethod: 'GRAPHQL_RESPONSE' };
         }
-        return { ok: true, externalCommentId: requireVerifiedCommentReference(href), verifiedReference: true };
+        const after = await this.exactCommentCount(text);
+        if (after > before) {
+          const candidates = [this.page.url(), ...(await this.exactCommentReferences(text))]
+            .filter((reference) => { const key = commentKey(reference); return key && !knownKeys.has(key); });
+          const unique = [...new Map(candidates.map((reference) => [commentKey(reference), reference])).values()];
+          if (unique.length === 1) return { ok: true, externalCommentId: requireVerifiedCommentReference(unique[0]), verifiedReference: true, verificationMethod: 'DOM_NEW_UNIQUE' };
+          if (unique.length > 1) throw Error('COMMENT_REFERENCE_AMBIGUOUS_NEEDS_REVIEW');
+        }
       }
+    } finally {
+      this.page.off('response', onResponse);
     }
     throw Error('COMMENT_SUBMIT_TIMEOUT_NEEDS_REVIEW');
   }
@@ -183,8 +234,18 @@ class FacebookPageAdapter {
     if (state !== 'CONNECTED') throw Error(state);
     await this.page.waitForTimeout(1800);
     const link = await this.commentLink(commentId);
-    if (!link) return { ok: false, code: 'OWNED_COMMENT_NOT_FOUND' };
-    const article = link.locator('xpath=ancestor::*[@role="article"][1]');
+    let article = link ? link.locator('xpath=ancestor::*[@role="article"][1]') : null;
+    if ((!article || !await article.count()) && commentKey(this.page.url()) === commentId && expectedMessage) {
+      const exact = this.page.locator('[role="article"]').filter({ hasText: String(expectedMessage) });
+      const matches = [];
+      for (let index = 0; index < await exact.count(); index += 1) {
+        const candidate = exact.nth(index);
+        const text = String(await candidate.innerText().catch(() => '') || '');
+        if (text.split('\n').some((line) => line.trim() === String(expectedMessage).trim())) matches.push(candidate);
+      }
+      if (matches.length === 1) article = matches[0];
+    }
+    if (!article) return { ok: true, code: 'ALREADY_ABSENT' };
     if (!await article.count()) return { ok: false, code: 'OWNED_COMMENT_ARTICLE_NOT_FOUND' };
     if (expectedMessage) {
       const text = String(await article.innerText().catch(() => '') || '');
@@ -219,4 +280,4 @@ class FacebookPageAdapter {
   }
 }
 
-module.exports = { FACEBOOK_HOME, COMMENT_LABELS, FacebookPageAdapter, classifyFacebookUrl, requireVerifiedCommentReference, selectNewVerifiedReference };
+module.exports = { FACEBOOK_HOME, COMMENT_LABELS, FacebookPageAdapter, buildCommentReference, classifyFacebookUrl, commentKey, graphqlCommentIds, requireVerifiedCommentReference, selectNewVerifiedReference };

@@ -1,0 +1,32 @@
+GUN SHOP DMO V20.2.1 — Facebook Reliability Migration
+
+Database: 3.3.0 → 3.3.1
+
+การเปลี่ยนแปลงแบบ additive และ backward-compatible:
+- FacebookBumpQueue เพิ่ม leaseToken, leaseExpiresAt, claimedAt, completedAt, resultFingerprint, reconcileStatus, lastTelemetryAt
+- FacebookOwnedComments เพิ่ม commentKey, jobId, verifiedAt, verificationMethod
+- เพิ่มชีต FacebookBumpTelemetry สำหรับ phase/outcome ของงานจริง
+- Worker ต่ออายุ lease ทุก 30 วินาที และตรวจ lease อีกครั้งก่อนกดส่ง Comment
+- Worker เก็บ journal ก่อนผ่านจุดส่งจริงและ replay เฉพาะผลที่มี comment_id ยืนยันแล้ว
+- ถ้า Restart ระหว่างกดส่งแต่ยังไม่มี comment_id จะ NEEDS_REVIEW และไม่ยิงซ้ำ
+- Backend ปฏิเสธ comment_id ที่เคยผูกกับ job อื่น แม้ URL จะมี tracking parameter ต่างกัน
+- ผล COMPLETED ซ้ำของ job เดิมต้องเป็น comment_id เดิมเท่านั้น มิฉะนั้น fail-closed
+- Cleanup เทียบ canonical comment_id และบันทึก ALREADY_ABSENT ได้เมื่อ URL owned ที่ระบุไม่พบ Comment แล้ว
+- Apps Script HTML/5xx/timeout/network error ถูกจำแนกและบันทึกใน local telemetry
+- Watchdog ปิดเฉพาะ Chrome Worker context ที่ค้างเกินกำหนด แล้วใช้ journal ตัดสิน recovery
+
+ลำดับอัปเกรด:
+1. Pause All และยืนยัน Queue active = 0
+2. สำรอง Production Sheet และ worker-pair.json
+3. Deploy Apps Script 3.3.1
+4. ปิด Worker เดิมแบบควบคุม แล้วเปิด Worker 20.2.1 จาก source เดิมเพียงชุดเดียว
+5. ตรวจ /status: workerVersion 20.2.1-reliability, Worker ONLINE, Browser RUNNING, Facebook CONNECTED, paired true
+6. ตรวจ schema ใหม่และ FacebookBumpTelemetry
+7. ทำ REAL short soak ทีละโพสต์ ตรวจ comment_id ไม่ซ้ำ, History, Ownership, Cleanup และ Queue = 0
+8. เปิด Scheduler/เริ่ม long-run หลัง short soak PASS เท่านั้น
+
+Rollback:
+- Apps Script rollback ไป deployment/version ก่อนหน้าได้
+- Git rollback ไป commit ก่อน V20.2.1 ได้
+- Header/ชีตที่เพิ่มไม่ต้องลบและไม่กระทบข้อมูลเดิม
+- ใช้สำเนา Production Sheet ที่สร้างก่อน Deploy หากเกิดความเสียหายกับข้อมูล (ห้าม restore โดยไม่ตรวจ diff)

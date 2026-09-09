@@ -11,6 +11,7 @@ const css=fs.readFileSync(path.join(root,'app.css'),'utf8');
 const worker=fs.readFileSync(path.join(root,'facebook-worker','worker.js'),'utf8');
 const facebookPage=fs.readFileSync(path.join(root,'facebook-worker','facebook-page.js'),'utf8');
 const recoverySource=fs.readFileSync(path.join(root,'facebook-worker','recovery.js'),'utf8');
+const backendClientSource=fs.readFileSync(path.join(root,'facebook-worker','backend-client.js'),'utf8');
 const index=fs.readFileSync(path.join(root,'index.html'),'utf8');
 const serviceWorker=fs.readFileSync(path.join(root,'sw.js'),'utf8');
 const tests=[];
@@ -20,7 +21,7 @@ function assert(value,message){if(!value)throw Error(message);}
 let uuidCounter=0;
 const context={console,Date,Map,Set,JSON,Math,String,Number,Boolean,Error,RegExp,Utilities:{getUuid:()=>`00000000-0000-4000-8000-${String(++uuidCounter).padStart(12,'0')}`,formatDate:()=>`20260817-1200${String(uuidCounter).padStart(2,'0')}`},Session:{getScriptTimeZone:()=> 'Asia/Bangkok'}};
 vm.createContext(context);
-new vm.Script(`${main}\n${moduleSource}\n;globalThis.__fb={facebookBumpNextRunAt,facebookBumpNextCadenceAt,facebookBumpExpired,facebookBumpPlanDuePosts,facebookBumpSelectNextPending,facebookBumpCleanupCandidate,facebookBumpRealCommentReferenceValid,facebookBumpUrlValid,facebookBumpSettings,facebookBumpPauseNeedsReview,facebookBumpRecoverStaleJobs,facebookBumpExpirePosts,facebookBumpExecuteJob,claimFacebookBumpJob,completeFacebookBumpJob,failFacebookBumpJob};`).runInContext(context);
+new vm.Script(`${main}\n${moduleSource}\n;globalThis.__fb={facebookBumpNextRunAt,facebookBumpNextCadenceAt,facebookBumpExpired,facebookBumpPlanDuePosts,facebookBumpSelectNextPending,facebookBumpCleanupCandidate,facebookBumpCommentKey,facebookBumpKnownCommentIds,facebookBumpRealCommentReferenceValid,facebookBumpUrlValid,facebookBumpSettings,facebookBumpPauseNeedsReview,facebookBumpRecoverStaleJobs,facebookBumpExpirePosts,facebookBumpExecuteJob,claimFacebookBumpJob,renewFacebookBumpJobLease,completeFacebookBumpJob,failFacebookBumpJob};`).runInContext(context);
 const api=context.__fb;
 
 function installMemoryStore(posts,queue,comments,history){
@@ -42,8 +43,8 @@ const post=(id,offset=0)=>({id,name:`Post ${id}`,postUrl:`https://www.facebook.c
 const job=(id,targetPostId,offset=0,url)=>({jobId:id,targetPostId,postName:`Post ${targetPostId}`,postUrl:url||`https://www.facebook.com/posts/${targetPostId}`,message:'+',scheduledAt:new Date(baseTime.getTime()+offset),status:'PENDING',attempts:0,error:'',createdAt:baseTime,updatedAt:baseTime,source:'SCHEDULED'});
 
 test('Pre-flight schema is additive and database version advances',()=>{
-  ['FacebookBumpPosts','FacebookBumpQueue','FacebookBumpHistory','FacebookOwnedComments'].forEach(name=>assert(main.includes(name),`missing ${name}`));
-  assert(main.includes("const DATABASE_VERSION='3.3.0'"),'database version is not 3.3.0');
+  ['FacebookBumpPosts','FacebookBumpQueue','FacebookBumpHistory','FacebookOwnedComments','FacebookBumpTelemetry'].forEach(name=>assert(main.includes(name),`missing ${name}`));
+  assert(main.includes("const DATABASE_VERSION='3.3.1'"),'database version is not 3.3.1');
   ['runDurationHours','runStartedAt','runUntil'].forEach(header=>assert(main.includes(header),`duration schema missing ${header}`));
   assert(main.includes("facebookBumpPaused:'TRUE'")&&moduleSource.includes("value('facebookBumpPaused',true)"),'Facebook module is not safe-paused by default');
   ['stockLogs','orders','customers','seals'].forEach(key=>assert(main.includes(`${key}:`),`protected schema missing ${key}`));
@@ -99,7 +100,7 @@ test('Admin status reads safety settings through display values',()=>{
   const start=moduleSource.indexOf('function getFacebookBumpData');
   const end=moduleSource.indexOf('function queueFacebookWorkerCommand',start);
   const source=moduleSource.slice(start,end);
-  assert(source.includes('const settings=facebookBumpSettings()'),'Admin status bypasses the canonical display-value settings reader');
+  assert(source.includes('settings=facebookBumpSettings()'),'Admin status bypasses the canonical display-value settings reader');
   assert(!source.includes('facebookBumpSettings(facebookBumpReadRowsFast(SHEETS.settings))'),'Admin status still uses the lossy fast Settings reader');
 });
 
@@ -135,6 +136,14 @@ test('Stuck real queue leases fail closed without cancelling unrelated posts',()
   assert(posts[0].enabled==='FALSE'&&queue[1].status==='CANCELLED','affected post can still create a duplicate');
   assert(posts[1].enabled==='TRUE'&&queue[2].status==='PENDING','unrelated post was changed');
   assert(history[0].action==='RECOVER_STALE_REAL_JOB','stale recovery audit history missing');
+});
+
+test('Renewed real queue leases are not falsely recovered',()=>{
+  const posts=[post('A')],queue=[{...job('A-LIVE','A'),status:'PROCESSING',source:'REAL_WORKER:FACEBOOK_WORKER:PC2',updatedAt:new Date(baseTime.getTime()-600000),leaseToken:'lease-live',leaseExpiresAt:new Date(baseTime.getTime()+60000)}],comments=[],history=[];
+  installMemoryStore(posts,queue,comments,history);
+  assert(api.facebookBumpRecoverStaleJobs(queue,posts,baseTime).length===0,'renewed lease was recovered as stale');
+  assert(queue[0].status==='PROCESSING'&&posts[0].enabled==='TRUE','renewed job was changed');
+  assert(moduleSource.includes('function renewFacebookBumpJobLease')&&worker.includes("action: 'renewFacebookBumpJobLease'"),'renewable lease path is missing');
 });
 
 test('Test C — new owned comment is recorded before previous owned comment cleanup',()=>{
@@ -201,22 +210,40 @@ test('REAL queue records the new owned comment before idempotent cleanup',()=>{
   const actor={userId:'FACEBOOK_WORKER:PC2',role:'WORKER'};
   const claimed=api.claimFacebookBumpJob({workerStatus:{connection:'CONNECTED'}},actor);
   assert(claimed.job&&queue[0].status==='PROCESSING'&&queue[0].attempts===1,'PENDING did not transition to PROCESSING exactly once');
+  const leaseToken=claimed.job.leaseToken;
   const commentUrl='https://www.facebook.com/groups/1/posts/2/?comment_id=9001';
-  const completed=api.completeFacebookBumpJob({jobId:'REAL-J1',externalCommentId:commentUrl,message:'+',cleanupResult:'PENDING'},actor);
+  const completed=api.completeFacebookBumpJob({jobId:'REAL-J1',leaseToken,externalCommentId:commentUrl,message:'+',cleanupResult:'PENDING',verificationMethod:'TEST'},actor);
   assert(completed.ok&&queue[0].status==='COMPLETED','PROCESSING did not transition to COMPLETED');
   assert(comments.length===2&&comments[1].externalCommentId===commentUrl&&comments[1].status==='ACTIVE'&&comments[0].status==='ACTIVE','verified owned comment was not recorded before cleanup');
   assert(history.length===1&&history[0].result==='COMPLETED'&&history[0].commentId===commentUrl&&history[0].cleanupResult==='PENDING','REAL completion history is incomplete');
-  const finalized=api.completeFacebookBumpJob({jobId:'REAL-J1',externalCommentId:commentUrl,cleanupResult:'DELETED',previousCommentId:oldComment},actor);
+  const finalized=api.completeFacebookBumpJob({jobId:'REAL-J1',leaseToken,externalCommentId:commentUrl,cleanupResult:'DELETED',previousCommentId:oldComment},actor);
   assert(finalized.idempotent===true&&finalized.cleanupUpdated===true&&comments[0].status==='DELETED'&&history[0].cleanupResult==='DELETED','verified cleanup was not finalized idempotently');
-  const repeated=api.completeFacebookBumpJob({jobId:'REAL-J1',externalCommentId:commentUrl,cleanupResult:'DELETED',previousCommentId:oldComment},actor);
+  const repeated=api.completeFacebookBumpJob({jobId:'REAL-J1',leaseToken,externalCommentId:commentUrl,cleanupResult:'DELETED',previousCommentId:oldComment},actor);
   assert(repeated.idempotent===true&&comments.length===2&&history.length===1,'repeated completion duplicated audit or ownership records');
 
   posts.push(post('BAD'));queue.push(job('BAD-J1','BAD'));
-  api.claimFacebookBumpJob({workerStatus:{connection:'CONNECTED'}},actor);
-  let invalidReferenceRejected=false;try{api.completeFacebookBumpJob({jobId:'BAD-J1',externalCommentId:'UNVERIFIED-temp'},actor);}catch(error){invalidReferenceRejected=/COMMENT_REFERENCE_INVALID_NEEDS_REVIEW/.test(String(error&&error.message||error));}
+  const badClaim=api.claimFacebookBumpJob({workerStatus:{connection:'CONNECTED'}},actor);
+  let invalidReferenceRejected=false;try{api.completeFacebookBumpJob({jobId:'BAD-J1',leaseToken:badClaim.job.leaseToken,externalCommentId:'UNVERIFIED-temp'},actor);}catch(error){invalidReferenceRejected=/COMMENT_REFERENCE_INVALID_NEEDS_REVIEW/.test(String(error&&error.message||error));}
   assert(invalidReferenceRejected,'unverified reference was accepted as a REAL completion');
-  api.failFacebookBumpJob({jobId:'BAD-J1',error:'COMMENT_REFERENCE_INVALID_NEEDS_REVIEW',externalCommentId:'UNVERIFIED-temp'},actor);
+  api.failFacebookBumpJob({jobId:'BAD-J1',leaseToken:badClaim.job.leaseToken,error:'COMMENT_REFERENCE_INVALID_NEEDS_REVIEW',externalCommentId:'UNVERIFIED-temp'},actor);
   assert(queue[1].status==='FAILED'&&posts[1].enabled==='FALSE'&&posts[1].lastStatus==='NEEDS_REVIEW','unverified completion did not fail closed');
+});
+
+test('Duplicate comment IDs fail closed and late verified results reconcile once',()=>{
+  const actor={userId:'FACEBOOK_WORKER:PC2',role:'WORKER'},existingUrl='https://www.facebook.com/groups/1/posts/2/?comment_id=7001';
+  const posts=[post('DUP')],queue=[{...job('DUP-J1','DUP'),status:'PROCESSING',source:'REAL_WORKER:FACEBOOK_WORKER:PC2',leaseToken:'lease-dup'}],comments=[{id:'REAL-OLD',targetPostId:'DUP',externalCommentId:existingUrl,message:'+',createdAt:baseTime,deletedAt:'',status:'ACTIVE',commentKey:'7001',jobId:'OLD'}],history=[];
+  installMemoryStore(posts,queue,comments,history);
+  let duplicateRejected=false;try{api.completeFacebookBumpJob({jobId:'DUP-J1',leaseToken:'lease-dup',externalCommentId:`${existingUrl}&tracking=new`},actor);}catch(error){duplicateRejected=/COMMENT_ID_ALREADY_OWNED_NEEDS_REVIEW/.test(String(error));}
+  assert(duplicateRejected&&queue[0].status==='PROCESSING'&&comments.length===1&&history.length===0,'duplicate comment ID produced a false completion');
+
+  const latePost=post('LATE');latePost.enabled='FALSE';latePost.lastStatus='NEEDS_REVIEW';posts.push(latePost);
+  queue.push({...job('LATE-J1','LATE'),status:'FAILED',source:'REAL_WORKER:FACEBOOK_WORKER:PC2',leaseToken:'lease-late',error:'WORKER_LEASE_EXPIRED_NEEDS_REVIEW'});
+  const lateUrl='https://www.facebook.com/groups/1/posts/3/?comment_id=7002';
+  const reconciled=api.completeFacebookBumpJob({jobId:'LATE-J1',leaseToken:'lease-late',externalCommentId:lateUrl,message:'+',cleanupResult:'SKIPPED',verificationMethod:'JOURNAL_REPLAY',reconcile:true},actor);
+  assert(reconciled.reconciled===true&&queue[1].status==='COMPLETED','late verified result was not reconciled');
+  assert(latePost.enabled==='FALSE'&&latePost.lastStatus==='RECONCILED_SUCCESS_PAUSED','late reconcile resumed scheduling automatically');
+  const again=api.completeFacebookBumpJob({jobId:'LATE-J1',leaseToken:'lease-late',externalCommentId:lateUrl,cleanupResult:'SKIPPED'},actor);
+  assert(again.idempotent===true&&comments.filter(item=>item.jobId==='LATE-J1').length===1,'repeated reconciled result duplicated ownership');
 });
 
 test('Permissions, safe Dry Run default and Real mode guard are present',()=>{
@@ -243,8 +270,8 @@ test('Worker uses one persistent browser and can focus an existing window',()=>{
   assert(worker.includes('if (focus) await page.bringToFront()'),'background polling can steal focus from other apps');
   assert(worker.includes("openFacebookPage(FACEBOOK_HOME,{focus:true})")&&worker.includes("ensureBrowser({ force: true, focus: true })"),'explicit browser actions cannot focus the worker window');
   assert(worker.includes("worker: 'ONLINE'")&&worker.includes("browser: browserRunning ? 'RUNNING' : 'STOPPED'"),'worker/browser status missing');
-  assert(worker.includes('BACKEND_TIMEOUT_MS')&&worker.includes('AbortController'),'stalled backend request recovery missing');
-  assert(worker.includes("WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io,https://shop-dmo.github.io'")&&!worker.includes('loopbackOrigin'),'worker CORS allowlist is not limited to the old and proposed Production origins');
+  assert(worker.includes('BACKEND_TIMEOUT_MS')&&backendClientSource.includes('AbortController'),'stalled backend request recovery missing');
+  assert(worker.includes("WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io,https://shop-dmo.github.io'")&&!worker.includes('loopbackOrigin'),'worker CORS allowlist is not limited to the old and new Production origins');
   assert(worker.includes("if (!origin && req.method !== 'GET') return false"),'unauthenticated no-origin POST requests are still accepted');
   assert(worker.includes("req.url === '/open')")&&worker.includes('openFacebookPage(FACEBOOK_HOME,{focus:true})')&&!worker.includes('openFacebookPage(body.url || FACEBOOK_HOME'),'local open endpoint can navigate the Facebook profile to an arbitrary origin');
   assert(frontend.includes("targetAddressSpace:'local'"),'Production fetch does not request local-network access');
@@ -302,11 +329,11 @@ test('Worker crash recovery is bounded and stale real jobs fail closed',()=>{
   assert(moduleSource.includes("if(/NEEDS_REVIEW/.test(String(job.error||'')))"),'unsafe retry guard missing');
   assert(frontend.includes('recoverFacebookWorkerPair'),'BackOffice pair recovery missing');
   assert(facebookPage.includes('COMMENT_SUBMIT_TIMEOUT_NEEDS_REVIEW')&&facebookPage.includes('COMMENT_REFERENCE_UNVERIFIED_NEEDS_REVIEW'),'uncertain comments can be retried and duplicated');
-  assert(worker.includes('needsReviewError(error, Boolean(created))')&&worker.includes("externalCommentId: created && created.externalCommentId || ''"),'post-submit backend or cleanup failures can be retried and duplicated');
+  assert(worker.includes("stored.state === 'SUBMITTING'")&&worker.includes("stored.state === 'COMMENT_CREATED'")&&worker.includes('reconcile: true'),'post-submit backend or cleanup failures can be retried and duplicated');
   assert(worker.indexOf("cleanupResult = previousCommentId ? 'PENDING' : 'SKIPPED'")<worker.indexOf('adapter.deleteOwnedComment(previousCommentId'),'worker deletes an old comment before the new ownership record is committed');
   assert(moduleSource.includes('function facebookBumpFinalizeCleanup')&&moduleSource.includes('cleanupUpdated:facebookBumpFinalizeCleanup'),'cleanup finalization is not idempotent');
   assert(moduleSource.includes("function facebookBumpPauseNeedsReview")&&moduleSource.includes("post.lastStatus='NEEDS_REVIEW'")&&moduleSource.includes('if(needsReview)facebookBumpPauseNeedsReview(post,queue,now)'),'uncertain real failure does not pause the post');
-  assert(moduleSource.includes("if(String(job.status)==='COMPLETED')return output({ok:true,idempotent:true")&&moduleSource.includes("if(String(job.status)==='FAILED')return output({ok:true,idempotent:true})"),'bounded terminal-status retries are not idempotent');
+  assert(moduleSource.includes("if(String(job.status)==='COMPLETED')")&&moduleSource.includes("if(String(job.status)==='FAILED')return output({ok:true,idempotent:true})"),'bounded terminal-status retries are not idempotent');
 });
 
 test('Server-side expiry, queue cancellation and cleanup hardening are present',()=>{

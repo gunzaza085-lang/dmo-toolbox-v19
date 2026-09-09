@@ -8,20 +8,31 @@ const { portableProfileDir } = require('./portable-preflight');
 const { RecoveryBackoff, isBrowserClosedError, needsReviewError } = require('./recovery');
 const { acquireInstanceLock } = require('./instance-lock');
 const { createPairingStore, validApiUrl, validWorkerToken } = require('./pairing-store');
+const { backendPost: sendBackendPost, retryBackendAction } = require('./backend-client');
+const { LeaseKeeper } = require('./lease-keeper');
+const { ResultStore } = require('./result-store');
+const { PersistentTelemetry } = require('./telemetry');
 
 const HOST = '127.0.0.1';
+const WORKER_VERSION = '20.2.1-reliability';
 const PORT = Number(process.env.FACEBOOK_WORKER_PORT || 17821);
 const BACKEND_TIMEOUT_MS = Number(process.env.FACEBOOK_WORKER_BACKEND_TIMEOUT_MS || 45000);
 const POLL_INTERVAL_MS = Math.max(15000, Number(process.env.FACEBOOK_WORKER_POLL_MS || 30000));
 const HEARTBEAT_INTERVAL_MS = Math.max(15000, Number(process.env.FACEBOOK_WORKER_HEARTBEAT_MS || 30000));
+const LEASE_RENEW_INTERVAL_MS = Math.max(10000, Number(process.env.FACEBOOK_WORKER_LEASE_RENEW_MS || 30000));
+const JOB_WATCHDOG_MS = Math.max(60000, Number(process.env.FACEBOOK_WORKER_JOB_WATCHDOG_MS || 210000));
 const PROFILE_DIR = portableProfileDir();
 const PAIRING_FILE = path.join(PROFILE_DIR, 'worker-pair.json');
 const INSTANCE_LOCK_FILE = path.join(PROFILE_DIR, 'worker-instance.lock');
+const TELEMETRY_FILE = path.join(PROFILE_DIR, 'worker-telemetry.jsonl');
+const RESULT_STORE_FILE = path.join(PROFILE_DIR, 'worker-results.json');
 const ALLOWED_ORIGINS = new Set((process.env.WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io,https://shop-dmo.github.io').split(',').map((item) => item.trim()).filter(Boolean));
 let instanceLock;
 try { instanceLock = acquireInstanceLock(INSTANCE_LOCK_FILE); }
 catch (error) { console.error(String(error && error.message || error)); process.exit(1); }
 const pairingStore = createPairingStore(PAIRING_FILE);
+const telemetry = new PersistentTelemetry(TELEMETRY_FILE);
+const resultStore = new ResultStore(RESULT_STORE_FILE);
 process.once('exit', () => instanceLock.release());
 
 let context = null;
@@ -41,6 +52,9 @@ let account = { name: '', identifier: '', checkedAt: '' };
 let browserLaunchPromise = null;
 let intentionalBrowserClose = false;
 let browserAutoRecoveryEnabled = true;
+let currentJobPhase = '';
+let lastTelemetryEvent = '';
+let journalRecoveryPromise = null;
 const recoveryBackoff = new RecoveryBackoff({
   baseDelayMs: Number(process.env.FACEBOOK_WORKER_RECOVERY_BASE_MS || 5000),
   maxDelayMs: Number(process.env.FACEBOOK_WORKER_RECOVERY_MAX_MS || 120000),
@@ -49,7 +63,7 @@ const recoveryBackoff = new RecoveryBackoff({
 function publicStatus(connection = 'DISCONNECTED') {
   lastConnection = String(connection || lastConnection || 'DISCONNECTED');
   const browserRunning = Boolean(context && page && !page.isClosed());
-  return { ok: true, worker: 'ONLINE', browser: browserRunning ? 'RUNNING' : 'STOPPED', connection: browserRunning ? lastConnection : 'DISCONNECTED', paired: Boolean(paired), running: Boolean(activeJobId), lastError, lastClaimReason, lastClaimAt, workerPid: process.pid, browserProfile: path.basename(PROFILE_DIR), recovery: { failures: recoveryBackoff.failures, retryInMs: recoveryBackoff.remainingMs() }, account: { ...account }, lastChecked: new Date().toISOString() };
+  return { ok: true, worker: 'ONLINE', workerVersion: WORKER_VERSION, browser: browserRunning ? 'RUNNING' : 'STOPPED', connection: browserRunning ? lastConnection : 'DISCONNECTED', paired: Boolean(paired), running: Boolean(activeJobId), activeJobId, currentJobPhase, pendingResultCount: resultStore.pending().length, telemetryFile: path.basename(TELEMETRY_FILE), lastTelemetryEvent, lastError, lastClaimReason, lastClaimAt, workerPid: process.pid, browserProfile: path.basename(PROFILE_DIR), recovery: { failures: recoveryBackoff.failures, retryInMs: recoveryBackoff.remainingMs() }, account: { ...account }, lastChecked: new Date().toISOString() };
 }
 
 async function refreshAccountIdentity(adapter) {
@@ -138,18 +152,23 @@ async function connectionStatus() {
   return publicStatus(connection);
 }
 
+function recordTelemetry(event, fields = {}) {
+  const record = telemetry.append(event, fields);
+  lastTelemetryEvent = record.event;
+  currentJobPhase = record.phase || currentJobPhase;
+  return record;
+}
+
+async function reportJobTelemetry(event, fields = {}) {
+  const record = recordTelemetry(event, fields);
+  if (!paired) return record;
+  try { await apiPost({ action: 'reportFacebookBumpTelemetry', telemetry: record }); }
+  catch (error) { recordTelemetry('REMOTE_TELEMETRY_FAILED', { ...fields, outcome: 'FAILED', detail: String(error && error.message || error) }); }
+  return record;
+}
+
 async function backendPost(apiUrl, token, payload) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), BACKEND_TIMEOUT_MS);
-  try {
-    const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...payload, token }), signal: controller.signal });
-    const data = await response.json();
-    if (!data.ok) throw Error(data.error || 'BACKEND_REQUEST_FAILED');
-    return data;
-  } catch (error) {
-    if (error && error.name === 'AbortError') throw Error('BACKEND_TIMEOUT');
-    throw error;
-  } finally { clearTimeout(timeout); }
+  return sendBackendPost(apiUrl, token, payload, { timeoutMs: BACKEND_TIMEOUT_MS });
 }
 
 async function apiPost(payload) {
@@ -182,11 +201,36 @@ async function establishPairing(apiUrl, adminToken) {
 }
 
 async function finishJob(action, payload) {
-  let error;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    try { return await apiPost({ action, ...payload }); } catch (caught) { error = caught; await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1))); }
-  }
-  throw error;
+  return retryBackendAction(() => apiPost({ action, ...payload }), { maxAttempts: 4, baseDelayMs: 1000, maxDelayMs: 8000 });
+}
+
+async function recoverPendingJournal() {
+  if (!paired) return;
+  if (journalRecoveryPromise) return journalRecoveryPromise;
+  journalRecoveryPromise = (async () => {
+    for (const item of resultStore.pending()) {
+      const base = { jobId: item.jobId, targetPostId: item.targetPostId, leaseToken: item.leaseToken, attempt: item.attempt };
+      try {
+        if (item.state === 'COMMENT_CREATED' && item.externalCommentId) {
+          await finishJob('completeFacebookBumpJob', { jobId: item.jobId, leaseToken: item.leaseToken, externalCommentId: item.externalCommentId, message: item.message, cleanupResult: item.cleanupResult || 'PENDING', verificationMethod: item.verificationMethod || 'JOURNAL_REPLAY', reconcile: true });
+          await reportJobTelemetry('JOURNAL_RECONCILED', { ...base, phase: 'RESULT', outcome: 'COMPLETED', externalCommentId: item.externalCommentId });
+          resultStore.acknowledge(item.jobId);
+        } else if (item.state === 'SUBMITTING') {
+          await finishJob('failFacebookBumpJob', { jobId: item.jobId, leaseToken: item.leaseToken, error: 'WORKER_RESTART_DURING_SUBMIT_NEEDS_REVIEW' });
+          await reportJobTelemetry('JOURNAL_RECONCILED', { ...base, phase: 'SUBMIT', outcome: 'NEEDS_REVIEW', detail: 'Worker restarted after the irreversible boundary' });
+          resultStore.acknowledge(item.jobId);
+        } else if (item.state === 'CLAIMED') {
+          await finishJob('failFacebookBumpJob', { jobId: item.jobId, leaseToken: item.leaseToken, error: 'WORKER_RESTART_BEFORE_SUBMIT' });
+          await reportJobTelemetry('JOURNAL_RECONCILED', { ...base, phase: 'PRE_SUBMIT', outcome: 'SAFE_FAILED' });
+          resultStore.acknowledge(item.jobId);
+        }
+      } catch (error) {
+        recordTelemetry('JOURNAL_RECONCILE_FAILED', { ...base, phase: item.state, outcome: 'FAILED', detail: String(error && error.message || error) });
+      }
+    }
+    resultStore.prune();
+  })().finally(() => { journalRecoveryPromise = null; });
+  return journalRecoveryPromise;
 }
 
 async function executeRemoteCommand(command, adapter) {
@@ -202,6 +246,8 @@ async function executeRemoteCommand(command, adapter) {
 
 async function processOnce() {
   if (!paired || running) return;
+  await recoverPendingJournal();
+  if (resultStore.pending().length) { lastClaimReason = 'JOURNAL_NEEDS_REVIEW'; return; }
   let adapter;
   try { adapter = await ensureBrowser(); }
   catch (error) { lastError = String(error && error.message || error).slice(0, 300); await reportRemoteHeartbeat(true).catch(() => {}); return; }
@@ -237,35 +283,91 @@ async function processOnce() {
     }
     if (connection !== 'CONNECTED') { lastError = connection; return; }
     if (!claim.job) return;
-    const { job, previousOwnedComment, cleanupOld } = claim;
+    const { job, previousOwnedComment, cleanupOld, knownCommentIds = [] } = claim;
     activeJobId = String(job.jobId || '');
+    currentJobPhase = 'CLAIMED';
     let created = null;
     let jobCompleted = false;
+    const leaseToken = String(job.leaseToken || '');
+    const telemetryBase = { jobId: job.jobId, targetPostId: job.targetPostId, attempt: job.attempts, leaseToken };
+    const lease = new LeaseKeeper({
+      intervalMs: LEASE_RENEW_INTERVAL_MS,
+      safetyMs: 20000,
+      renew: () => apiPost({ action: 'renewFacebookBumpJobLease', jobId: job.jobId, leaseToken, workerStatus: publicStatus(connection) }),
+    }).start(job.leaseExpiresAt || claim.leaseExpiresAt);
+    resultStore.put(job.jobId, { state: 'CLAIMED', targetPostId: job.targetPostId, leaseToken, attempt: job.attempts, message: job.message, postUrl: job.postUrl });
+    recordTelemetry('JOB_CLAIMED', { ...telemetryBase, phase: 'CLAIMED', outcome: 'OK' });
+    const watchdog = setTimeout(() => {
+      recordTelemetry('JOB_WATCHDOG', { ...telemetryBase, phase: currentJobPhase, outcome: 'ABORTED', detail: `Exceeded ${JOB_WATCHDOG_MS}ms` });
+      invalidateBrowser(Error('JOB_WATCHDOG_ABORTED')).catch(() => {});
+    }, JOB_WATCHDOG_MS);
     try {
+      currentJobPhase = 'OPEN_POST';
       await adapter.openPost(job.postUrl);
-      created = await adapter.submitComment(job.message);
+      currentJobPhase = 'PRE_SUBMIT';
+      created = await adapter.submitComment(job.message, {
+        knownCommentIds,
+        beforeSubmit: async () => {
+          await lease.beforeIrreversible();
+          resultStore.put(job.jobId, { state: 'SUBMITTING', submitStartedAt: new Date().toISOString() });
+          recordTelemetry('SUBMIT_STARTED', { ...telemetryBase, phase: 'SUBMITTING', outcome: 'STARTED' });
+          currentJobPhase = 'SUBMITTING';
+        },
+      });
+      resultStore.put(job.jobId, { state: 'COMMENT_CREATED', externalCommentId: created.externalCommentId, verificationMethod: created.verificationMethod, cleanupResult: cleanupOld && previousOwnedComment ? 'PENDING' : 'SKIPPED' });
+      recordTelemetry('COMMENT_VERIFIED', { ...telemetryBase, phase: 'RESULT', outcome: 'VERIFIED', externalCommentId: created.externalCommentId, detail: created.verificationMethod });
       const previousCommentId = cleanupOld && previousOwnedComment ? previousOwnedComment.externalCommentId || '' : '';
       let cleanupResult = previousCommentId ? 'PENDING' : 'SKIPPED';
-      await finishJob('completeFacebookBumpJob', { jobId: job.jobId, externalCommentId: created.externalCommentId, message: job.message, cleanupResult });
+      currentJobPhase = 'COMMIT_RESULT';
+      await finishJob('completeFacebookBumpJob', { jobId: job.jobId, leaseToken, externalCommentId: created.externalCommentId, message: job.message, cleanupResult, verificationMethod: created.verificationMethod });
       jobCompleted = true;
+      resultStore.acknowledge(job.jobId);
+      await reportJobTelemetry('RESULT_COMMITTED', { ...telemetryBase, phase: 'RESULT', outcome: 'COMPLETED', externalCommentId: created.externalCommentId });
       if (cleanupOld && previousOwnedComment) {
+        currentJobPhase = 'CLEANUP';
         try {
           const cleanup = await adapter.deleteOwnedComment(previousCommentId, previousOwnedComment.message || '');
-          cleanupResult = cleanup.ok ? 'DELETED' : `CLEANUP_FAILED:${cleanup.code}`;
+          cleanupResult = cleanup.ok ? cleanup.code : `CLEANUP_FAILED:${cleanup.code}`;
         } catch (error) {
           cleanupResult = `CLEANUP_FAILED:${needsReviewError(error)}`;
           if (isBrowserClosedError(error)) { await invalidateBrowser(error); recoveryBackoff.failure(); }
         }
-        try { await finishJob('completeFacebookBumpJob', { jobId: job.jobId, externalCommentId: created.externalCommentId, cleanupResult, previousCommentId }); }
+        recordTelemetry('CLEANUP_FINISHED', { ...telemetryBase, phase: 'CLEANUP', outcome: cleanupResult, externalCommentId: previousCommentId });
+        try { await finishJob('completeFacebookBumpJob', { jobId: job.jobId, leaseToken, externalCommentId: created.externalCommentId, cleanupResult, previousCommentId, verificationMethod: created.verificationMethod });await reportJobTelemetry('CLEANUP_REPORTED', { ...telemetryBase, phase: 'CLEANUP', outcome: cleanupResult, externalCommentId: previousCommentId }); }
         catch (error) { lastError = `CLEANUP_REPORT_FAILED:${String(error && error.message || error).slice(0, 260)}`; return; }
       }
       lastError = cleanupResult.indexOf('CLEANUP_FAILED:')===0 ? cleanupResult : '';
     } catch (error) {
       if (jobCompleted) { lastError = `POST_COMPLETE_CLEANUP_ERROR:${String(error && error.message || error).slice(0, 260)}`; return; }
-      const code = needsReviewError(error, Boolean(created));
+      const stored = resultStore.get(job.jobId);
+      if (stored && stored.state === 'COMMENT_CREATED' && stored.externalCommentId) {
+        try {
+          await finishJob('completeFacebookBumpJob', { jobId: job.jobId, leaseToken, externalCommentId: stored.externalCommentId, message: job.message, cleanupResult: stored.cleanupResult || 'PENDING', verificationMethod: stored.verificationMethod || 'JOURNAL_REPLAY', reconcile: true });
+          resultStore.acknowledge(job.jobId);
+          jobCompleted = true;
+          lastError = '';
+          recordTelemetry('RESULT_RECONCILED', { ...telemetryBase, phase: 'RESULT', outcome: 'COMPLETED', externalCommentId: stored.externalCommentId });
+          return;
+        } catch (reconcileError) {
+          error = reconcileError;
+        }
+      }
+      const uncertain = stored && stored.state === 'SUBMITTING' || Boolean(created);
+      const code = needsReviewError(error, uncertain);
       lastError = code;
       if (isBrowserClosedError(error)) { await invalidateBrowser(error); recoveryBackoff.failure(); }
-      await finishJob('failFacebookBumpJob', { jobId: job.jobId, error: code, externalCommentId: created && created.externalCommentId || '' });
+      recordTelemetry('JOB_FAILED', { ...telemetryBase, phase: currentJobPhase, outcome: uncertain ? 'NEEDS_REVIEW' : 'SAFE_FAILED', detail: code, externalCommentId: created && created.externalCommentId || '' });
+      try {
+        await finishJob('failFacebookBumpJob', { jobId: job.jobId, leaseToken, error: code, externalCommentId: created && created.externalCommentId || '' });
+        resultStore.acknowledge(job.jobId);
+        await reportJobTelemetry('FAILURE_REPORTED', { ...telemetryBase, phase: currentJobPhase, outcome: uncertain ? 'NEEDS_REVIEW' : 'SAFE_FAILED', detail: code });
+      } catch (reportError) {
+        lastError = `FAIL_REPORT_PENDING:${String(reportError && reportError.message || reportError).slice(0, 240)}`;
+      }
+    } finally {
+      clearTimeout(watchdog);
+      lease.stop();
+      currentJobPhase = '';
     }
   } finally { activeJobId = ''; running = false; }
 }
