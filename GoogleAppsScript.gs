@@ -389,9 +389,11 @@ function rowsTail(name,limit){
   return vals.map(r=>{const o={};h.forEach((k,i)=>{if(k)o[k]=r[i];});return o;}).filter(o=>Object.keys(o).some(k=>String(o[k]??'').trim()!==''));
 }
 function rowsFields(name,fields,limit){
-  const key=Object.keys(SHEETS).find(k=>SHEETS[k]===name),s=ss().getSheetByName(name)||sheet(name,HEADERS[key]||[]),lastRow=s.getLastRow(),lastCol=s.getLastColumn(),wanted=(fields||[]).map(String);if(lastRow<2||lastCol<1||!wanted.length)return[];
+  const key=Object.keys(SHEETS).find(k=>SHEETS[k]===name),s=ss().getSheetByName(name)||sheet(name,HEADERS[key]||[]),wanted=(fields||[]).map(String);if(!wanted.length)return[];
+  const maxRows=limit?Math.max(1,number(limit)):0,lastRow=maxRows?s.getLastRow():0;if(!maxRows||lastRow<=maxRows+1){const all=s.getDataRange().getDisplayValues();if(all.length<2)return[];const headers=all[0].map(x=>String(x).trim()),columns=wanted.map(field=>[field,headers.indexOf(field)]).filter(([,index])=>index>=0);return all.slice(1).map(row=>{const out={};columns.forEach(([field,index])=>{out[field]=row[index];});return out;}).filter(out=>wanted.some(field=>String(out[field]??'').trim()!==''));}
+  const lastCol=s.getLastColumn();if(lastRow<2||lastCol<1)return[];
   const headers=s.getRange(1,1,1,lastCol).getDisplayValues()[0].map(x=>String(x).trim()),columns=wanted.map(field=>headers.indexOf(field)).filter(index=>index>=0);if(!columns.length)return[];
-  const minColumn=Math.min(...columns),maxColumn=Math.max(...columns),start=limit?Math.max(2,lastRow-Math.max(1,number(limit))+1):2,values=s.getRange(start,minColumn+1,lastRow-start+1,maxColumn-minColumn+1).getDisplayValues();
+  const minColumn=Math.min(...columns),maxColumn=Math.max(...columns),start=Math.max(2,lastRow-maxRows+1),values=s.getRange(start,minColumn+1,lastRow-start+1,maxColumn-minColumn+1).getDisplayValues();
   return values.map(row=>{const out={};wanted.forEach(field=>{const column=headers.indexOf(field);if(column>=minColumn&&column<=maxColumn)out[field]=row[column-minColumn];});return out;}).filter(out=>wanted.some(field=>String(out[field]??'').trim()!==''));
 }
 function existingRows(name){const s=ss().getSheetByName(name);return s?readSheetFlexible(s):[];}

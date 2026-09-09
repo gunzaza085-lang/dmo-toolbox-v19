@@ -50,6 +50,7 @@ test('dashboard scope avoids large order/customer payloads',()=>{
   assert(summary.includes("rowsFields(SHEETS.orders,['total','status','deletedAt'],600)")&&summary.includes("rowsFields(SHEETS.customers,['orderCount'],1500)"),'dashboard does not use narrow field reads');
   assert(summary.includes("['id','name','category','status','stock','reservedStock','lowStockAlert']")&&(summary.match(/\.filter\(x=>x\.id&&x\.name\)/g)||[]).length===3,'dashboard no longer preserves product identity filtering');
   assert(gas.includes('s=ss().getSheetByName(name)||sheet(name,HEADERS[key]||[])'),'narrow reads still repeat schema validation on every dashboard sheet');
+  assert(gas.includes('if(!maxRows||lastRow<=maxRows+1){const all=s.getDataRange().getDisplayValues()'),'small dashboard sheets still split headers and rows into separate Apps Script service calls');
   assert(readAdmin.includes('settingRows=existingRows(SHEETS.settings)')&&readAdmin.includes('userRows=existingRows(SHEETS.users)')&&readAdmin.includes('systemRows=existingRows(SHEETS.system)'),'admin base data still repeats schema validation reads');
   assert(app.includes("if(state.page==='admin'){state.loading=false;render();if(state.adminToken)loadAdmin(false);}else loadData(true)"),'direct admin route still waits for storefront data');
   assert(app.includes("state.adminToken?state.settings:{shopName:'GUN SHOP DMO',ownerName:''}"),'direct admin login leaks the legacy fallback owner identity');
