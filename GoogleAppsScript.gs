@@ -389,7 +389,7 @@ function rowsTail(name,limit){
   return vals.map(r=>{const o={};h.forEach((k,i)=>{if(k)o[k]=r[i];});return o;}).filter(o=>Object.keys(o).some(k=>String(o[k]??'').trim()!==''));
 }
 function rowsFields(name,fields,limit){
-  const key=Object.keys(SHEETS).find(k=>SHEETS[k]===name),s=sheet(name,HEADERS[key]||[]),lastRow=s.getLastRow(),lastCol=s.getLastColumn(),wanted=(fields||[]).map(String);if(lastRow<2||lastCol<1||!wanted.length)return[];
+  const key=Object.keys(SHEETS).find(k=>SHEETS[k]===name),s=ss().getSheetByName(name)||sheet(name,HEADERS[key]||[]),lastRow=s.getLastRow(),lastCol=s.getLastColumn(),wanted=(fields||[]).map(String);if(lastRow<2||lastCol<1||!wanted.length)return[];
   const headers=s.getRange(1,1,1,lastCol).getDisplayValues()[0].map(x=>String(x).trim()),columns=wanted.map(field=>headers.indexOf(field)).filter(index=>index>=0);if(!columns.length)return[];
   const minColumn=Math.min(...columns),maxColumn=Math.max(...columns),start=limit?Math.max(2,lastRow-Math.max(1,number(limit))+1):2,values=s.getRange(start,minColumn+1,lastRow-start+1,maxColumn-minColumn+1).getDisplayValues();
   return values.map(row=>{const out={};wanted.forEach(field=>{const column=headers.indexOf(field);if(column>=minColumn&&column<=maxColumn)out[field]=row[column-minColumn];});return out;}).filter(out=>wanted.some(field=>String(out[field]??'').trim()!==''));
@@ -429,9 +429,9 @@ function dashboardSummary(){
   };
 }
 function readAdmin(actor,requestedScope){
-  const scope=String(requestedScope||'ALL'),all=scope==='ALL',needs=(...names)=>all||names.includes(scope),settingRows=rows(SHEETS.settings),settings={};
+  const scope=String(requestedScope||'ALL'),all=scope==='ALL',needs=(...names)=>all||names.includes(scope),settingRows=existingRows(SHEETS.settings),settings={};
   settingRows.forEach(x=>{if(String(x.key)!=='apiKey'||(actor&&['OWNER','ADMIN'].includes(actor.role)))settings[x.key]=smart(x.value);});
-  const setting=(key,fallback)=>Object.prototype.hasOwnProperty.call(settings,key)?settings[key]:fallback,userRows=rows(SHEETS.users),actorUser=actor?userRows.find(x=>String(x.userId)===String(actor.userId)):null,environment=environmentInfo(),result={settings,databaseVersion:getSystemValue('databaseVersion')||DATABASE_VERSION,security:{actor,account:actorUser?{userId:actorUser.userId,displayName:actorUser.displayName,role:actorUser.role,status:actorUser.status}:null,environment:environment.environment,users:(all||scope==='security')&&actor&&actor.role==='OWNER'?listUsers(userRows):[],sessionDays:setting('sessionDays',7),autoLockMinutes:setting('autoLockMinutes',30),apiKeyConfigured:!!String(setting('apiKey',''))}};
+  const setting=(key,fallback)=>Object.prototype.hasOwnProperty.call(settings,key)?settings[key]:fallback,userRows=existingRows(SHEETS.users),actorUser=actor?userRows.find(x=>String(x.userId)===String(actor.userId)):null,environment=environmentInfo(),systemRows=existingRows(SHEETS.system),databaseVersion=(systemRows.find(x=>String(x.key)==='databaseVersion')||{}).value||DATABASE_VERSION,result={settings,databaseVersion,security:{actor,account:actorUser?{userId:actorUser.userId,displayName:actorUser.displayName,role:actorUser.role,status:actorUser.status}:null,environment:environment.environment,users:(all||scope==='security')&&actor&&actor.role==='OWNER'?listUsers(userRows):[],sessionDays:setting('sessionDays',7),autoLockMinutes:setting('autoLockMinutes',30),apiKeyConfigured:!!String(setting('apiKey',''))}};
   let seals=[],gameItems=[],moneyT=null,services=[],orders=[],customers=[];
   if(scope==='dashboard')result.dashboardSummary=dashboardSummary();
   if(needs('catalog','images','inventory','calculator','analytics','reports','orders','marketing','automation','wiki')){seals=rows(SHEETS.seals).filter(x=>x.id&&x.name).map(normalizeSeal);const allItems=rows(SHEETS.items).filter(x=>x.id&&x.name).map(normalizeItem);gameItems=allItems.filter(x=>x.kind==='ITEM');moneyT=allItems.find(x=>x.kind==='TMONEY')||null;services=rows(SHEETS.services).filter(x=>x.id&&x.name).map(normalizeService);Object.assign(result,{seals,gameItems,moneyT,services,stockUpdatedAt:stockUpdatedAt()});}
