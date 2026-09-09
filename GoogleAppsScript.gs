@@ -42,7 +42,7 @@ const DEFAULT_PRODUCT_SUBCATEGORIES=[
 ];
 const DEFAULT_ORDER_COPY_TEMPLATE='{title}\n{items}\n{pricing}\n{promotions}\n{customer}\n{notice}';
 const DEFAULT_SETTINGS = {
-  shopName:'GUN SHOP DMO', ownerName:'Natthananat Kawinwatthanakorn', promoThreshold:100, promoReward:150,
+  shopName:'SHOP DMO', ownerName:'', promoThreshold:100, promoReward:150,
   categoryDiscountSealPercent:0, categoryDiscountItemPercent:0, categoryDiscountServicePercent:0,
   orderNotice:'รายการนี้ยังไม่ใช่การยืนยันคำสั่งซื้อ กรุณารอร้านตรวจสอบสต๊อกและยืนยันยอดก่อนโอน',
   orderCopyTemplate:DEFAULT_ORDER_COPY_TEMPLATE, orderCopyShowItems:'TRUE', orderCopyShowPricing:'TRUE',
@@ -72,6 +72,9 @@ const ORDER_TRANSITIONS={NEW:['CHECKING','CANCELLED'],CHECKING:['PREPARING','CAN
 const PASSWORD_ALGO='ITERATED-HMAC-SHA256-6000';
 const KNOWN_INSECURE_OWNER_HASH='77acc467d71ca17d5a480aa17d8b0b05d536139a61c99a08d1573dd81eab7d03';
 const PUBLIC_CACHE_KEY='public-catalog-v20-2-theme-performance-2';
+const ADMIN_DASHBOARD_CACHE_KEY='admin-dashboard-v20-2-shell-performance-1';
+const ADMIN_DASHBOARD_SETTINGS_CACHE_KEY='admin-dashboard-settings-v20-2-shell-performance-1';
+const ADMIN_DASHBOARD_SETTING_FIELDS=['shopName','ownerName','themeDefault','themePrimaryColor','themeAccentColor','themeBackgroundColor','themeButtonColor','themeImportantColor','autoLockMinutes'];
 const PRODUCTION_SPREADSHEET_ID='1AXYpPnrBRQPYhdDYODV80S4UTz5-gLEXIO_Jn8Rt-sM';
 const TEST_SPREADSHEET_ID='1WPtJgFe7jswHafieD7zJ19pjSxrdFZACT4iLCi_PfLM';
 const PUBLIC_CACHE_MUTATIONS=['createOrder','upsert','delete','softDelete','restoreTrash','permanentDelete','bulkUpdate','saveSettings','adjustStock','setStock','upsertPromotion','deletePromotion','updateOrder','applyImageZip'];
@@ -116,13 +119,13 @@ function doPost(e){
     const session=getSession(body.token,true);
     if(!session) throw Error('กรุณาเข้าสู่ระบบใหม่');
     const actor={userId:String(session.userId),role:String(session.role||'VIEWER')};
-    if(PUBLIC_CACHE_MUTATIONS.includes(body.action))invalidatePublicCache();
+    if(PUBLIC_CACHE_MUTATIONS.includes(body.action)){invalidatePublicCache();invalidateAdminDashboardCaches();}
     const adminWriteActions=['upsert','delete','softDelete','restoreTrash','permanentDelete','bulkUpdate','saveSettings','uploadImage','previewImageZip','applyImageZip','importWikiImage','attachWikiMetadata','upsertPromotion','deletePromotion','createBackup','restoreBackup','setupBackupTrigger','deleteBackup','saveSecurityUser','adjustStock','setStock','syncStock','markOrderSpam','saveFacebookBumpPost','deleteFacebookBumpPost','toggleFacebookBumpPost','queueFacebookBumpNow','cancelFacebookBumpJob','retryFacebookBumpJob','saveFacebookBumpSettings','pauseAllFacebookBumps','resumeAllFacebookBumps','ensureFacebookBumpTrigger','disableFacebookBumpTrigger','queueFacebookWorkerCommand','pairFacebookWorker','revokeFacebookWorkerPair'];
     const staffWriteActions=['updateOrder','updateOrderItemPick','updateCustomer','addCustomerInteraction'];
     if(adminWriteActions.includes(body.action)) requireRole(body.token,['OWNER','ADMIN']);
     if(staffWriteActions.includes(body.action)) requireRole(body.token,['OWNER','ADMIN','STAFF']);
     switch(body.action){
-      case'getAdminData': return output({ok:true,...readAdmin(actor,body.scope)});
+      case'getAdminData': return output({ok:true,...readAdmin(actor,body.scope,body.fresh===true)});
       case'getFacebookBumpAdminData': return output({ok:true,facebookBump:getFacebookBumpData(actor)});
       case'upsert': return upsert(body.record,actor.userId);
       case'delete': return softDelete(body.kind,body.id,actor.userId);
@@ -412,11 +415,18 @@ function readPublic(){
   const promotions=existingRows(SHEETS.promotions).filter(x=>x.promotionId&&x.name).map(normalizePromotion).filter(p=>p.status==='ACTIVE').map(publicPromotion);
   const result={seals,gameItems,services,moneyT:moneyT?publicProduct(moneyT):null,settings:publicSettings(),promotions,stockUpdatedAt:stockUpdatedAt()};putCachedPublic(result);return result;
 }
-function dashboardSummary(){
+function invalidateAdminDashboardCaches(){CacheService.getScriptCache().removeAll([ADMIN_DASHBOARD_CACHE_KEY,ADMIN_DASHBOARD_SETTINGS_CACHE_KEY]);}
+function cachedAdminDashboardSettings(forceRefresh){
+  const cache=CacheService.getScriptCache();if(!forceRefresh){const cached=cache.get(ADMIN_DASHBOARD_SETTINGS_CACHE_KEY);if(cached)try{return JSON.parse(cached);}catch(e){}}
+  const all={};existingRows(SHEETS.settings).forEach(x=>{const key=String(x.key);if(ADMIN_DASHBOARD_SETTING_FIELDS.includes(key))all[key]=smart(x.value);});
+  cache.put(ADMIN_DASHBOARD_SETTINGS_CACHE_KEY,JSON.stringify(all),60);return all;
+}
+function dashboardSummary(forceRefresh){
+  const cache=CacheService.getScriptCache();if(!forceRefresh){const cached=cache.get(ADMIN_DASHBOARD_CACHE_KEY);if(cached)try{return JSON.parse(cached);}catch(e){}}
   const seals=rowsFields(SHEETS.seals,['id','name','category','status','stock','reservedStock','lowStockAlert']).filter(x=>x.id&&x.name),allItems=rowsFields(SHEETS.items,['id','name','status','stock','reservedStock','lowStockAlert']).filter(x=>x.id&&x.name),services=rowsFields(SHEETS.services,['id','name','status','stock']).filter(x=>x.id&&x.name),products=seals.concat(allItems,services);
-  const orders=rowsFields(SHEETS.orders,['total','status','deletedAt'],600).reverse().filter(x=>!x.deletedAt).slice(0,500),customers=rowsFields(SHEETS.customers,['orderCount'],1500).reverse(),customerCount=Math.max(0,sheet(SHEETS.customers,HEADERS.customers).getLastRow()-1),promotions=rowsFields(SHEETS.promotions,['promotionId','name','status']),available=p=>availableQty(p.stock,p.reservedStock),status=x=>String(x.status||'ACTIVE');
+  const orders=rowsFields(SHEETS.orders,['total','status','deletedAt'],600).reverse().filter(x=>!x.deletedAt).slice(0,500),customers=rowsFields(SHEETS.customers,['orderCount'],1500).reverse(),customerSheet=ss().getSheetByName(SHEETS.customers),customerCount=Math.max(0,(customerSheet?customerSheet.getLastRow():1)-1),promotions=rowsFields(SHEETS.promotions,['promotionId','name','status']),available=p=>availableQty(p.stock,p.reservedStock),status=x=>String(x.status||'ACTIVE');
   const completed=orders.filter(x=>status(x)==='COMPLETED');
-  return{
+  const result={
     newOrders:orders.filter(x=>status(x)==='NEW').length,
     preparingOrders:orders.filter(x=>['CHECKING','PREPARING'].includes(status(x))).length,
     readyOrders:orders.filter(x=>status(x)==='READY').length,
@@ -428,14 +438,18 @@ function dashboardSummary(){
     repeatCustomers:customers.filter(x=>number(x.orderCount)>=2).length,
     activePromos:promotions.filter(x=>status(x)==='ACTIVE').length,
     categoryCounts:['AT','HT','CT','HP','DS','DE','EV','BL'].map(category=>[category,seals.filter(x=>String(x.category)===category).length])
-  };
+  };cache.put(ADMIN_DASHBOARD_CACHE_KEY,JSON.stringify(result),30);return result;
 }
-function readAdmin(actor,requestedScope){
-  const scope=String(requestedScope||'ALL'),all=scope==='ALL',needs=(...names)=>all||names.includes(scope),settingRows=existingRows(SHEETS.settings),settings={};
+function readAdmin(actor,requestedScope,forceRefresh){
+  const scope=String(requestedScope||'ALL'),all=scope==='ALL',needs=(...names)=>all||names.includes(scope);
+  if(scope==='dashboard'){
+    const settings=cachedAdminDashboardSettings(forceRefresh),environment=environmentInfo();
+    return{settings,databaseVersion:DATABASE_VERSION,security:{actor,account:null,environment:environment.environment,users:[],sessionDays:7,autoLockMinutes:number(settings.autoLockMinutes)||30,apiKeyConfigured:false},dashboardSummary:dashboardSummary(forceRefresh)};
+  }
+  const settingRows=existingRows(SHEETS.settings),settings={};
   settingRows.forEach(x=>{if(String(x.key)!=='apiKey'||(actor&&['OWNER','ADMIN'].includes(actor.role)))settings[x.key]=smart(x.value);});
   const setting=(key,fallback)=>Object.prototype.hasOwnProperty.call(settings,key)?settings[key]:fallback,userRows=existingRows(SHEETS.users),actorUser=actor?userRows.find(x=>String(x.userId)===String(actor.userId)):null,environment=environmentInfo(),systemRows=existingRows(SHEETS.system),databaseVersion=(systemRows.find(x=>String(x.key)==='databaseVersion')||{}).value||DATABASE_VERSION,result={settings,databaseVersion,security:{actor,account:actorUser?{userId:actorUser.userId,displayName:actorUser.displayName,role:actorUser.role,status:actorUser.status}:null,environment:environment.environment,users:(all||scope==='security')&&actor&&actor.role==='OWNER'?listUsers(userRows):[],sessionDays:setting('sessionDays',7),autoLockMinutes:setting('autoLockMinutes',30),apiKeyConfigured:!!String(setting('apiKey',''))}};
   let seals=[],gameItems=[],moneyT=null,services=[],orders=[],customers=[];
-  if(scope==='dashboard')result.dashboardSummary=dashboardSummary();
   if(needs('catalog','images','inventory','calculator','analytics','reports','orders','marketing','automation','wiki')){seals=rows(SHEETS.seals).filter(x=>x.id&&x.name).map(normalizeSeal);const allItems=rows(SHEETS.items).filter(x=>x.id&&x.name).map(normalizeItem);gameItems=allItems.filter(x=>x.kind==='ITEM');moneyT=allItems.find(x=>x.kind==='TMONEY')||null;services=rows(SHEETS.services).filter(x=>x.id&&x.name).map(normalizeService);Object.assign(result,{seals,gameItems,moneyT,services,stockUpdatedAt:stockUpdatedAt()});}
   if(needs('analytics','reports','orders','customers','automation')){orders=rows(SHEETS.orders);const reversed=orders.slice().reverse();result.orders=reversed.filter(x=>!x.deletedAt).slice(0,500);if(needs('orders')){result.deletedOrders=actor&&['OWNER','ADMIN'].includes(actor.role)?reversed.filter(x=>!!x.deletedAt).slice(0,500):[];result.orderItems=rowsTail(SHEETS.orderItems,5000).reverse();}}
   if(needs('customers','automation')){customers=rows(SHEETS.customers);result.customers=customers.slice().reverse().slice(0,1500);}
@@ -601,7 +615,7 @@ function normalizeProductSubcategories(value){
 function saveSettings(settingsObj,actor){return withLock(()=>{
   const s=sheet(SHEETS.settings,HEADERS.settings),values=s.getDataRange().getValues(),rowByKey=new Map(),categoryDiscountKeys=new Set(['categoryDiscountSealPercent','categoryDiscountItemPercent','categoryDiscountServicePercent']),themeColorKeys=new Set(['themePrimaryColor','themeAccentColor','themeBackgroundColor','themeButtonColor','themeImportantColor']);for(let i=1;i<values.length;i++)rowByKey.set(String(values[i][0]),i+1);
   Object.keys(settingsObj||{}).forEach(k=>{let value=categoryDiscountKeys.has(k)?Math.max(0,Math.min(100,number(settingsObj[k]))):settingsObj[k];if(themeColorKeys.has(k)){value=String(value||'').trim().toUpperCase();if(!/^#[0-9A-F]{6}$/.test(value))value=DEFAULT_SETTINGS[k];}if(k==='themeDefault')value=String(value).toUpperCase()==='LIGHT'?'LIGHT':'DARK';if(k==='productSubcategoriesJson')value=JSON.stringify(normalizeProductSubcategories(value));if(k==='orderCopyTemplate')value=safeSheetText(String(value||''),12000);if(['websiteIntroText','websiteAnnouncement','websitePromotionText','websiteImportantNotice'].includes(k))value=safeSheetText(String(value||''),3000);const row=rowByKey.get(k);if(!row){s.appendRow([k,value,'']);rowByKey.set(k,s.getLastRow());}else s.getRange(row,2).setValue(value);if(categoryDiscountKeys.has(k))s.getRange(rowByKey.get(k),2).setNumberFormat('0.##');});if(Object.prototype.hasOwnProperty.call(settingsObj||{},'sessionDays'))PropertiesService.getScriptProperties().setProperty('SESSION_DAYS',String(settingsObj.sessionDays));
-  log('SETTINGS','SYSTEM','','',actor||'SYSTEM');return output({ok:true});
+  invalidateAdminDashboardCaches();log('SETTINGS','SYSTEM','','',actor||'SYSTEM');return output({ok:true});
 });}
 function productSaleUnit(product){return String(product.unit||((product.kind||'')==='SEAL'?'ชุด':(product.kind||'')==='TMONEY'?'T':'ชิ้น'));}
 function formatProductPrice(product){const unit=productSaleUnit(product),price=number(product.price),pack=number(product.packSize)||1000;return price+' บาท/'+unit+(unit==='ชุด'?' ('+pack+' ใบ)':'');}
@@ -659,7 +673,7 @@ function createOrder(b){return withLock(()=>{
     const order={orderId:id,createdAt:now,tamer:customerText.tamer,server:customerText.server,contact:customerText.contact,itemsJson:JSON.stringify(publicItems),total:pricing.total,promoSets:promo,status:'NEW',adminNote:'',updatedAt:now,requestId,pricingJson:JSON.stringify(pricing),inventoryState:'RESERVED'};orderSheet.appendRow(HEADERS.orders.map(k=>order[k]??''));orderWritten=true;
     const response={ok:true,orderId:id,total:pricing.total,subtotal:pricing.subtotal,discount:pricing.discount,categoryDiscounts:pricing.categoryDiscounts,categoryDiscountTotal:pricing.categoryDiscountTotal,promotionDiscount:pricing.promotionDiscount,promoSets:promo,promotions:pricing.applied};requestSheet.appendRow([requestId,now,id,sha256(customer.contact).slice(0,24),'COMPLETED',JSON.stringify(response)]);requestWritten=true;
     try{ensureCustomerProfile(customerText,now);stockSnapshots.forEach(x=>writeStockLog(x.item.kind,{id:x.item.productId,name:x.item.productName},x.item._stock,0,x.item._stock,x.item._reserved+x.item.quantity,'ORDER_RESERVE','ORDER '+id,'SYSTEM'));log('ORDER','ORDER',id,customerText.tamer,JSON.stringify({total:pricing.total,promo,items:publicItems.length,requestId}));}catch(logErr){}
-    protection.cache.put(protection.cooldownKey,String(Date.now()),protection.cooldown);invalidatePublicCache();return output(response);
+    protection.cache.put(protection.cooldownKey,String(Date.now()),protection.cooldown);invalidatePublicCache();invalidateAdminDashboardCaches();return output(response);
   }catch(err){for(let i=stockSnapshots.length-1;i>=0;i--){try{const x=stockSnapshots[i];x.s.getRange(x.row,x.col).setValue(x.value);}catch(rollbackErr){}}try{if(itemsWritten)deleteRowsByValue(itemSheet,1,id);}catch(rollbackErr){}try{if(orderWritten)deleteRowsByValue(orderSheet,0,id);}catch(rollbackErr){}try{if(requestWritten)deleteRowsByValue(requestSheet,0,requestId);}catch(rollbackErr){}throw err;}
 });}
 function migrateLegacyOrderItems(){return withLock(()=>{

@@ -4,6 +4,7 @@ const fs=require('fs');
 const path=require('path');
 const root=path.resolve(__dirname,'..');
 const port=Number(process.env.DMO_SMOKE_PORT||4174);
+const adminDelayMs=Math.max(0,Number(process.env.DMO_SMOKE_ADMIN_DELAY_MS||0));
 const configuredBase=String(process.env.DMO_SMOKE_BASE||'').trim();
 const basePath=configuredBase?`/${configuredBase.replace(/^\/+|\/+$/g,'')}`:'';
 const types={'.html':'text/html;charset=utf-8','.js':'text/javascript;charset=utf-8','.css':'text/css;charset=utf-8','.json':'application/json;charset=utf-8','.png':'image/png','.svg':'image/svg+xml','.ico':'image/x-icon'};
@@ -25,7 +26,7 @@ http.createServer((req,res)=>{
   const requestPath=basePath&&url.pathname.startsWith(`${basePath}/`)?url.pathname.slice(basePath.length):url.pathname;
   if(requestPath==='/api'){
     if(req.method==='GET')return sendJson(res,publicData);
-    let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{let payload={};try{payload=JSON.parse(body||'{}');}catch(error){}if(payload.action==='login')return sendJson(res,{ok:true,token:'LOCAL-SMOKE-TOKEN',user:{userId:'LOCAL-SMOKE',displayName:'Local smoke test',role:'OWNER',status:'ACTIVE'}});if(payload.action==='getAdminData')return sendJson(res,adminData(String(payload.scope||'dashboard')));if(payload.action==='logout'||payload.action==='saveSettings')return sendJson(res,{ok:true});sendJson(res,{ok:false,error:'LOCAL_SMOKE_READ_ONLY'});});return;
+    let body='';req.on('data',chunk=>body+=chunk);req.on('end',()=>{let payload={};try{payload=JSON.parse(body||'{}');}catch(error){}if(payload.action==='login')return sendJson(res,{ok:true,token:'LOCAL-SMOKE-TOKEN',user:{userId:'LOCAL-SMOKE',displayName:'Local smoke test',role:'OWNER',status:'ACTIVE'}});if(payload.action==='getAdminData'){const reply=()=>sendJson(res,adminData(String(payload.scope||'dashboard')));return adminDelayMs?setTimeout(reply,adminDelayMs):reply();}if(payload.action==='logout'||payload.action==='saveSettings')return sendJson(res,{ok:true});sendJson(res,{ok:false,error:'LOCAL_SMOKE_READ_ONLY'});});return;
   }
   if(requestPath==='/config.js'){res.writeHead(200,{'Content-Type':'text/javascript;charset=utf-8','Cache-Control':'no-store'});return res.end(`window.DMO_CONFIG=${JSON.stringify({sheetsUrl:`http://127.0.0.1:${port}${basePath}/api`,refreshMs:600000,appVersion:'LOCAL-SMOKE'})};`);}
   const file=path.resolve(root,requestPath==='/'?'index.html':requestPath.slice(1));if(!file.startsWith(root)){res.writeHead(403);return res.end('Forbidden');}

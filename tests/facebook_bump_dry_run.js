@@ -276,7 +276,7 @@ test('Worker uses one persistent browser and can focus an existing window',()=>{
   assert(worker.includes("req.url === '/open')")&&worker.includes('openFacebookPage(FACEBOOK_HOME,{focus:true})')&&!worker.includes('openFacebookPage(body.url || FACEBOOK_HOME'),'local open endpoint can navigate the Facebook profile to an arbitrary origin');
   assert(frontend.includes("targetAddressSpace:'local'"),'Production fetch does not request local-network access');
   assert(worker.includes("Access-Control-Allow-Private-Network', 'true'"),'worker does not approve private-network preflight');
-  assert(index.includes('app.js?v=20260909-v20.2-theme-performance-3')&&serviceWorker.includes('app.js?v=20260909-v20.2-theme-performance-3'),'PWA cache does not include the combined theme/performance build');
+  assert(index.includes('app.js?v=20260910-v20.2-admin-shell-performance-4')&&serviceWorker.includes('app.js?v=20260910-v20.2-admin-shell-performance-4'),'PWA cache does not include the combined admin shell/performance build');
   assert(frontend.includes('id="fbPauseAllBtn" ${state.facebookBump.pending?\'disabled\':\'\'}')&&frontend.includes('id="fbResumeAllBtn" ${state.facebookBump.pending?\'disabled\':\'\'}'),'stale admin state can lock out pause/resume recovery');
   assert(frontend.includes('facebookPairViaLocalTab')&&frontend.includes("event.data?.type!=='DMO_FACEBOOK_PAIR_RESULT'"),'BackOffice local pair bridge is missing');
   assert(worker.includes("req.url === '/pair-browser'")&&worker.includes('pairBridgeResponse'),'worker local pair bridge is missing');

@@ -6,6 +6,38 @@ let apiBusyCount = 0;
 let publicLoadPromise = null;
 let adminLoadPromise = null;
 let productSearchCache = new WeakMap();
+const ADMIN_NEUTRAL_SETTINGS = Object.freeze({ shopName: 'SHOP DMO', ownerName: '' });
+const ADMIN_SHELL_CACHE_KEY = 'dmo_admin_shell_v1';
+const ADMIN_SHELL_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
+const ADMIN_SHELL_SETTING_KEYS = ['shopName','ownerName','themeDefault','themePrimaryColor','themeAccentColor','themeBackgroundColor','themeButtonColor','themeImportantColor','autoLockMinutes'];
+
+function safeAdminShellSettings(settings) {
+  const result = {};
+  ADMIN_SHELL_SETTING_KEYS.forEach((key) => {
+    if (settings && Object.prototype.hasOwnProperty.call(settings, key)) result[key] = settings[key];
+  });
+  return result;
+}
+
+function restoreAdminShellCache() {
+  if (!sessionStorage.getItem('dmo_admin_token')) return null;
+  try {
+    const cached = JSON.parse(sessionStorage.getItem(ADMIN_SHELL_CACHE_KEY) || 'null');
+    if (!cached || !cached.savedAt || Date.now() - Number(cached.savedAt) > ADMIN_SHELL_CACHE_MAX_AGE_MS || !cached.dashboardSummary) return null;
+    return { settings: safeAdminShellSettings(cached.settings), dashboardSummary: cached.dashboardSummary, databaseVersion: String(cached.databaseVersion || '') };
+  } catch (error) { return null; }
+}
+
+function saveAdminShellCache(data) {
+  if (!state.adminToken || !data?.dashboardSummary) return;
+  try {
+    sessionStorage.setItem(ADMIN_SHELL_CACHE_KEY, JSON.stringify({ savedAt: Date.now(), settings: safeAdminShellSettings(data.settings), dashboardSummary: data.dashboardSummary, databaseVersion: String(data.databaseVersion || '') }));
+  } catch (error) {}
+}
+
+function clearAdminShellCache() { sessionStorage.removeItem(ADMIN_SHELL_CACHE_KEY); }
+
+const initialAdminShell = restoreAdminShellCache();
 
 const state = {
   page: location.hash === '#admin' ? 'admin' : 'shop',
@@ -86,6 +118,11 @@ const state = {
   facebookBump: { tab: 'POSTS', edit: null, pending: '', loadingModule: false, loadError: '', loadStartedAt: 0, loadDurationMs: 0, connection: { worker: 'UNKNOWN', browser: 'STOPPED', connection: 'UNKNOWN', paired: false, running: false, lastError: '', account: {} } },
   publicLoadedAt: 0,
 };
+
+if (state.adminToken && initialAdminShell) {
+  state.adminData = { ...adminBootstrapData(), ...initialAdminShell, security: { actor: state.adminUser || {} } };
+  state.adminLoadedScopes.add('dashboard');
+}
 
 let inputRenderTimer = 0;
 function scheduleInputRender(inputId, delay = 100) {
@@ -268,6 +305,34 @@ function toast(message) {
   toast.timer = setTimeout(() => el.classList.remove('show'), 2800);
 }
 
+function apiResponseError(message, retryable = false) {
+  const error = Error(message);
+  error.retryable = retryable;
+  return error;
+}
+
+async function fetchApiJson(url, options = {}, timeoutMs = 45000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    let response;
+    try { response = await fetch(url, { ...options, signal: controller.signal }); }
+    catch (error) {
+      if (error?.name === 'AbortError') throw apiResponseError('ระบบหลังบ้านตอบช้าเกิน 45 วินาที กรุณาลองใหม่', false);
+      throw apiResponseError('เชื่อมต่อระบบหลังบ้านไม่สำเร็จ กรุณาตรวจอินเทอร์เน็ตแล้วลองใหม่', true);
+    }
+    const raw = await response.text();
+    let data;
+    try { data = JSON.parse(raw); }
+    catch (error) {
+      const temporary = response.status === 404 || response.status >= 500 || /^\s*<!doctype\s+html/i.test(raw);
+      throw apiResponseError(`ระบบหลังบ้านตอบกลับไม่สมบูรณ์ (HTTP ${response.status || '-'}) กรุณาลองใหม่`, temporary);
+    }
+    if (!response.ok) throw apiResponseError(data?.error || `ระบบหลังบ้านไม่พร้อมใช้งาน (HTTP ${response.status})`, response.status === 404 || response.status >= 500);
+    return data;
+  } finally { clearTimeout(timeout); }
+}
+
 async function apiGet(admin = false, extra = {}) {
   const base = cfg.sheetsUrl;
   if (!base || base.includes('PASTE_')) throw Error('ยังไม่ได้ตั้งค่า URL ของ Google Apps Script');
@@ -278,8 +343,7 @@ async function apiGet(admin = false, extra = {}) {
     url.searchParams.set('admin', '1');
     url.searchParams.set('token', state.adminToken);
   }
-  const response = await fetch(url.toString(), { cache: 'no-store' });
-  const data = await response.json();
+  const data = await fetchApiJson(url.toString(), { cache: 'no-store' });
   if (!data.ok) throw Error(data.error || 'โหลดข้อมูลไม่สำเร็จ');
   return data;
 }
@@ -290,12 +354,19 @@ async function apiPost(payload) {
   if(sourceButton&&!sourceButton.disabled){sourceButton.dataset.originalText=sourceButton.innerHTML;sourceButton.disabled=true;sourceButton.innerHTML='<span class="loading"></span> กำลังดำเนินการ…';}
   apiBusyCount += 1;document.body.dataset.busyMessage=busyMessages[payload.action]||'กำลังดำเนินการ กรุณารอสักครู่…';document.body.classList.add('api-busy');
   try {
-    const response = await fetch(cfg.sheetsUrl, {
+    const send = () => fetchApiJson(cfg.sheetsUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(payload),
     });
-    const data = await response.json();
+    let data;
+    try { data = await send(); }
+    catch (error) {
+      const readOnly = payload.action === 'getAdminData' || payload.action === 'getFacebookBumpAdminData';
+      if (!readOnly || !error?.retryable) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      data = await send();
+    }
     if (!data.ok) throw Error(data.error || 'ทำรายการไม่สำเร็จ');
     return data;
   } finally {
@@ -363,7 +434,8 @@ function applyAdminRoleGuards(){
 function render() {
   applyTheme();
   const adminMode = state.page === 'admin';
-  const displaySettings=adminMode?(state.adminData?.settings||(state.adminToken?state.settings:{shopName:'GUN SHOP DMO',ownerName:''})):state.settings;
+  const loadedAdminSettings=state.adminData?.settings;
+  const displaySettings=adminMode?(loadedAdminSettings&&hasOwn(loadedAdminSettings,'shopName')?loadedAdminSettings:ADMIN_NEUTRAL_SETTINGS):state.settings;
   const { shopName, ownerName } = shopIdentity(displaySettings);
   const documentName = shopName || 'ระบบสั่งซื้อและตรวจสต๊อก';
   document.title = ownerName ? `${documentName} — ${ownerName}` : documentName;
@@ -757,7 +829,7 @@ function dashboardPage() {
   const categoryCounts = ['AT', 'HT', 'CT', 'HP', 'DS', 'DE', 'EV', 'BL'].map((category) => [category, (state.adminData?.seals || []).filter((x) => x.category === category).length]);
   const summary=state.adminData?.dashboardSummary||{newOrders:(state.adminData?.orders||[]).filter(x=>x.status==='NEW').length,preparingOrders,readyOrders,completedOrders:completedOrders.length,salesTotal,lowStock,checkOrOut:check+out,customerCount:(state.adminData?.customers||[]).length,repeatCustomers,activePromos:(state.adminData?.promotions||[]).filter(x=>x.status==='ACTIVE').length,categoryCounts};
   const summaryCategories=summary.categoryCounts||categoryCounts,summaryMax=Math.max(1,...summaryCategories.map(([,count])=>count));
-  return `<section class="panel"><div class="admin-toolbar"><div><h2 class="panel-title">ภาพรวมร้านวันนี้</h2><p class="product-meta">ออเดอร์ งานจัดของ ยอดขาย และสิ่งที่ต้องจัดการในหน้าเดียว</p></div><button class="btn primary" data-admin-view="orders">เปิดศูนย์ออเดอร์</button></div><div class="metrics commerce-metrics"><div class="metric urgent">ออเดอร์ใหม่<b>${summary.newOrders}</b><small>รอตรวจสอบ</small></div><div class="metric">กำลังจัดการ<b>${summary.preparingOrders}</b><small>ตรวจและจัดของ</small></div><div class="metric ready">พร้อมส่ง<b>${summary.readyOrders}</b><small>รอส่งลูกค้า</small></div><div class="metric sales">ยอดขายสำเร็จ<b>${money(summary.salesTotal)} บาท</b><small>${summary.completedOrders} ออเดอร์</small></div><div class="metric warning">สินค้าใกล้หมด<b>${summary.lowStock}</b><small>ควรเติมสต๊อก</small></div><div class="metric danger">สินค้าหมด/ต้องเช็ก<b>${summary.checkOrOut}</b><small>ต้องตรวจสอบ</small></div><div class="metric">ลูกค้าซื้อซ้ำ<b>${summary.repeatCustomers}</b><small>จาก ${summary.customerCount} คน</small></div><div class="metric">โปรที่เปิดใช้<b>${summary.activePromos}</b><small>กำลังทำงาน</small></div></div><div class="dashboard-sections"><div><h3>สรุปสินค้า</h3><div class="category-bars">${summaryCategories.map(([category,count])=>`<div class="bar-row"><b>${category}</b><div class="bar-track"><div class="bar-fill" style="width:${(count/summaryMax)*100}%"></div></div><span>${count}</span></div>`).join('')}</div></div><div class="attention-card"><h3>สิ่งที่ควรทำก่อน</h3><ol><li>ตรวจออเดอร์ใหม่ ${summary.newOrders} รายการ</li><li>จัดออเดอร์ที่กำลังดำเนินการ ${summary.preparingOrders} รายการ</li><li>ส่งมอบออเดอร์พร้อมส่ง ${summary.readyOrders} รายการ</li><li>ตรวจสินค้าสต๊อกต่ำ/หมด ${summary.lowStock+summary.checkOrOut} รายการ</li></ol></div></div></section>`;
+  return `<section class="panel"><div class="admin-toolbar"><div><h2 class="panel-title">ภาพรวมร้านวันนี้</h2><p class="product-meta">ออเดอร์ งานจัดของ ยอดขาย และสิ่งที่ต้องจัดการในหน้าเดียว</p></div><div class="stack admin-dashboard-actions">${state.adminLoading?'<span class="product-meta"><span class="loading"></span> กำลังอัปเดตข้อมูลล่าสุด…</span>':''}<button class="btn primary" data-admin-view="orders">เปิดศูนย์ออเดอร์</button></div></div><div class="metrics commerce-metrics"><div class="metric urgent">ออเดอร์ใหม่<b>${summary.newOrders}</b><small>รอตรวจสอบ</small></div><div class="metric">กำลังจัดการ<b>${summary.preparingOrders}</b><small>ตรวจและจัดของ</small></div><div class="metric ready">พร้อมส่ง<b>${summary.readyOrders}</b><small>รอส่งลูกค้า</small></div><div class="metric sales">ยอดขายสำเร็จ<b>${money(summary.salesTotal)} บาท</b><small>${summary.completedOrders} ออเดอร์</small></div><div class="metric warning">สินค้าใกล้หมด<b>${summary.lowStock}</b><small>ควรเติมสต๊อก</small></div><div class="metric danger">สินค้าหมด/ต้องเช็ก<b>${summary.checkOrOut}</b><small>ต้องตรวจสอบ</small></div><div class="metric">ลูกค้าซื้อซ้ำ<b>${summary.repeatCustomers}</b><small>จาก ${summary.customerCount} คน</small></div><div class="metric">โปรที่เปิดใช้<b>${summary.activePromos}</b><small>กำลังทำงาน</small></div></div><div class="dashboard-sections"><div><h3>สรุปสินค้า</h3><div class="category-bars">${summaryCategories.map(([category,count])=>`<div class="bar-row"><b>${category}</b><div class="bar-track"><div class="bar-fill" style="width:${(count/summaryMax)*100}%"></div></div><span>${count}</span></div>`).join('')}</div></div><div class="attention-card"><h3>สิ่งที่ควรทำก่อน</h3><ol><li>ตรวจออเดอร์ใหม่ ${summary.newOrders} รายการ</li><li>จัดออเดอร์ที่กำลังดำเนินการ ${summary.preparingOrders} รายการ</li><li>ส่งมอบออเดอร์พร้อมส่ง ${summary.readyOrders} รายการ</li><li>ตรวจสินค้าสต๊อกต่ำ/หมด ${summary.lowStock+summary.checkOrOut} รายการ</li></ol></div></div></section>`;
 }
 
 function calculatorPage() {
@@ -1331,7 +1403,7 @@ function dynamicEditModalMarkup(){
 }
 
 function adminBootstrapData() {
-  return {seals:state.seals||[],gameItems:state.items||[],services:state.services||[],moneyT:state.moneyT||null,settings:state.settings||{},dashboardSummary:null,orders:[],deletedOrders:[],orderItems:[],logs:[],stockLogs:[],stockUpdatedAt:'',customers:[],customerInteractions:[],promotions:state.promotions||[],trash:[],security:{actor:state.adminUser||{}},automation:{},facebookBump:null,databaseVersion:''};
+  return {seals:state.seals||[],gameItems:state.items||[],services:state.services||[],moneyT:state.moneyT||null,settings:{...ADMIN_NEUTRAL_SETTINGS},dashboardSummary:null,orders:[],deletedOrders:[],orderItems:[],logs:[],stockLogs:[],stockUpdatedAt:'',customers:[],customerInteractions:[],promotions:state.promotions||[],trash:[],security:{actor:state.adminUser||{}},automation:{},facebookBump:null,databaseVersion:''};
 }
 
 async function loadAdmin(force = true, scope = state.adminView || 'dashboard') {
@@ -1343,16 +1415,22 @@ async function loadAdmin(force = true, scope = state.adminView || 'dashboard') {
   if (!state.adminData) state.adminData = adminBootstrapData();
   render();
   adminLoadPromise=(async()=>{try {
-    const data = await apiPost({action:'getAdminData',token:state.adminToken,scope}),next={...(state.adminData||adminBootstrapData())};
-    ['seals','gameItems','services','moneyT','settings','dashboardSummary','orders','deletedOrders','orderItems','logs','stockLogs','stockUpdatedAt','customers','customerInteractions','promotions','trash','security','automation','databaseVersion'].forEach(key=>{if(hasOwn(data,key))next[key]=data[key];});
+    const data = await apiPost({action:'getAdminData',token:state.adminToken,scope,fresh:!!force}),next={...(state.adminData||adminBootstrapData())};
+    ['seals','gameItems','services','moneyT','dashboardSummary','orders','deletedOrders','orderItems','logs','stockLogs','stockUpdatedAt','customers','customerInteractions','promotions','trash','security','automation','databaseVersion'].forEach(key=>{if(hasOwn(data,key))next[key]=data[key];});
+    if(hasOwn(data,'settings'))next.settings={...(next.settings||{}),...data.settings};
     if(hasOwn(data,'facebookBump'))next.facebookBump=data.facebookBump;
     state.adminData=next;state.adminLoadedScopes.add(scope);
     state.adminLoadedAt = Date.now();
+    if(next.dashboardSummary)saveAdminShellCache(next);
     if(data.security&&data.security.actor){state.adminUser={...(state.adminUser||{}),...data.security.actor};sessionStorage.setItem('dmo_admin_user',JSON.stringify(state.adminUser));}
   } catch (error) {
     if (/เข้าสู่ระบบ/.test(error.message)) {
       state.adminToken = '';
+      state.adminData = null;
+      state.adminUser = null;
       sessionStorage.removeItem('dmo_admin_token');
+      sessionStorage.removeItem('dmo_admin_user');
+      clearAdminShellCache();
     }
     toast(error.message);
   } finally {
@@ -1716,8 +1794,8 @@ function bind() {
   const saveOrder = document.getElementById('saveOrderBtn'); if (saveOrder) saveOrder.onclick = async () => { if(state.orderSubmitting)return;try { const remaining=Math.ceil((state.orderCooldownUntil-Date.now())/1000);if(remaining>0)throw Error(`กรุณารอ ${remaining} วินาทีก่อนส่งออเดอร์ใหม่`);const customer = customerValues(); if(!customer.tamer.trim()) throw Error('กรุณากรอกชื่อเทมเมอร์'); if(!customer.contact.trim()) throw Error('กรุณากรอกชื่อ Facebook'); if(!state.cart.length) throw Error('ยังไม่มีสินค้าในรายการ');const fingerprint=JSON.stringify({customer,items:state.cart.map(x=>({id:x.id,kind:x.kind,quantity:x.quantity}))});if(state.pendingOrderFingerprint!==fingerprint){state.pendingOrderFingerprint=fingerprint;state.pendingOrderRequestId=(crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(16).slice(2)}`);}const website=document.getElementById('orderWebsite')?.value||'';state.orderSubmitting=true;render();const data = await apiPost({ action: 'createOrder', requestId:state.pendingOrderRequestId, customer, items: state.cart, website, startedAt:state.orderFormStartedAt }); if(!data.orderId) throw Error('ระบบยังไม่เปิดรับออเดอร์ กรุณาติดต่อร้าน'); saveRecentOrderSnapshot(data.orderId); state.orderSuccess={orderId:data.orderId,total:Number(data.total||0),discount:Number(data.discount||0)};const cooldown=Math.max(5,Math.min(120,Number(state.settings.orderSubmitCooldownSeconds)||30));state.orderCooldownUntil=Date.now()+cooldown*1000;localStorage.setItem('dmo_order_cooldown_until',String(state.orderCooldownUntil));state.orderFormStartedAt=Date.now();state.cart=[];state.pendingOrderRequestId='';state.pendingOrderFingerprint='';state.orderSubmitting=false;render();setTimeout(()=>{if(state.page==='shop')render();},cooldown*1000+100);window.scrollTo({top:0,behavior:'smooth'}); } catch (error) { state.orderSubmitting=false;render();toast(error.message); } };
   const adminEntry = document.getElementById('adminEntry'); if (adminEntry) adminEntry.onclick = () => { state.page = 'admin'; location.hash = 'admin'; if (state.adminToken) loadAdmin(false); else render(); };
   const backShop = document.getElementById('backShopBtn'); if (backShop) backShop.onclick = () => { state.page = 'shop'; location.hash = ''; if(!state.publicLoadedAt)loadData(true);else render(); };
-  const login = document.getElementById('loginBtn'); if (login) login.onclick = async () => { if(state.loginSubmitting)return;const adminId=document.getElementById('adminId').value,password=document.getElementById('adminPassword').value;state.loginSubmitting=true;render();try { const data = await apiPost({ action: 'login', adminId, password }); state.loginSubmitting=false;state.adminToken = data.token; state.adminUser=data.user||null;state.adminData=adminBootstrapData();state.adminLoadedAt=0;state.adminLoadedScopes=new Set(); state.lastAdminActivity=Date.now(); sessionStorage.setItem('dmo_admin_token', data.token); sessionStorage.setItem('dmo_admin_user',JSON.stringify(state.adminUser)); sessionStorage.setItem('dmo_admin_activity',String(state.lastAdminActivity));render();await loadAdmin(true); } catch (error) { state.loginSubmitting=false;render();toast(error.message); } };
-  const logout = document.getElementById('logoutBtn'); if (logout) logout.onclick = async () => { try{await apiPost({action:'logout',token:state.adminToken});}catch(e){} state.adminToken = ''; state.adminData = null;state.adminLoadedScopes=new Set(); state.adminUser=null; sessionStorage.removeItem('dmo_admin_token');sessionStorage.removeItem('dmo_admin_user');sessionStorage.removeItem('dmo_admin_activity'); render(); };
+  const login = document.getElementById('loginBtn'); if (login) login.onclick = async () => { if(state.loginSubmitting)return;const adminId=document.getElementById('adminId').value,password=document.getElementById('adminPassword').value;state.loginSubmitting=true;render();try { const data = await apiPost({ action: 'login', adminId, password }); state.loginSubmitting=false;state.adminToken = data.token; state.adminUser=data.user||null;state.adminData=adminBootstrapData();state.adminLoadedAt=0;state.adminLoadedScopes=new Set(); state.lastAdminActivity=Date.now(); sessionStorage.setItem('dmo_admin_token', data.token); sessionStorage.setItem('dmo_admin_user',JSON.stringify(state.adminUser)); sessionStorage.setItem('dmo_admin_activity',String(state.lastAdminActivity));render();await loadAdmin(false); } catch (error) { state.loginSubmitting=false;render();toast(error.message); } };
+  const logout = document.getElementById('logoutBtn'); if (logout) logout.onclick = async () => { try{await apiPost({action:'logout',token:state.adminToken});}catch(e){} state.adminToken = ''; state.adminData = null;state.adminLoadedScopes=new Set(); state.adminUser=null; sessionStorage.removeItem('dmo_admin_token');sessionStorage.removeItem('dmo_admin_user');sessionStorage.removeItem('dmo_admin_activity');clearAdminShellCache(); render(); };
   document.querySelectorAll('[data-admin-view]').forEach((button) => button.onclick = async () => {
     state.adminView = button.dataset.adminView;
     render();
@@ -1791,7 +1869,7 @@ function bind() {
   const saveSettings = document.getElementById('saveSettingsBtn'); if (saveSettings) saveSettings.onclick = saveSettingsAction;
   const copyFacebookPostBtn=document.getElementById('copyFacebookPostBtn');if(copyFacebookPostBtn)copyFacebookPostBtn.onclick=()=>copyText(document.getElementById('facebookPostPreview')?.value||facebookPostText(),'คัดลอกข้อความโพสต์ Facebook แล้ว');
   document.querySelectorAll('[data-toggle-password]').forEach((button)=>button.onclick=()=>{const input=document.getElementById(button.dataset.togglePassword);if(!input)return;const show=input.type==='password';input.type=show?'text':'password';button.textContent=show?'ซ่อน':'แสดง';});
-  const changeOwnerPasswordBtn=document.getElementById('changeOwnerPasswordBtn');if(changeOwnerPasswordBtn)changeOwnerPasswordBtn.onclick=async()=>{if(state.adminActionPending)return;const currentPassword=document.getElementById('ownerCurrentPassword').value,newPassword=document.getElementById('ownerNewPassword').value,confirmPassword=document.getElementById('ownerConfirmPassword').value;if(newPassword.length<10)return toast('รหัสผ่านใหม่ต้องมีอย่างน้อย 10 ตัวอักษร');if(newPassword!==confirmPassword)return toast('รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน');try{state.adminActionPending='OWNER_PASSWORD';changeOwnerPasswordBtn.disabled=true;changeOwnerPasswordBtn.textContent='กำลังเปลี่ยนรหัสผ่าน...';const data=await apiPost({action:'changeOwnerPassword',token:state.adminToken,currentPassword,newPassword,confirmPassword});state.adminToken='';state.adminData=null;state.adminUser=null;sessionStorage.removeItem('dmo_admin_token');sessionStorage.removeItem('dmo_admin_user');sessionStorage.removeItem('dmo_admin_activity');render();toast(data.message||'เปลี่ยนรหัสผ่านสำเร็จ กรุณาเข้าสู่ระบบอีกครั้ง');}catch(e){toast(e.message);}finally{state.adminActionPending='';}};
+  const changeOwnerPasswordBtn=document.getElementById('changeOwnerPasswordBtn');if(changeOwnerPasswordBtn)changeOwnerPasswordBtn.onclick=async()=>{if(state.adminActionPending)return;const currentPassword=document.getElementById('ownerCurrentPassword').value,newPassword=document.getElementById('ownerNewPassword').value,confirmPassword=document.getElementById('ownerConfirmPassword').value;if(newPassword.length<10)return toast('รหัสผ่านใหม่ต้องมีอย่างน้อย 10 ตัวอักษร');if(newPassword!==confirmPassword)return toast('รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน');try{state.adminActionPending='OWNER_PASSWORD';changeOwnerPasswordBtn.disabled=true;changeOwnerPasswordBtn.textContent='กำลังเปลี่ยนรหัสผ่าน...';const data=await apiPost({action:'changeOwnerPassword',token:state.adminToken,currentPassword,newPassword,confirmPassword});state.adminToken='';state.adminData=null;state.adminUser=null;sessionStorage.removeItem('dmo_admin_token');sessionStorage.removeItem('dmo_admin_user');sessionStorage.removeItem('dmo_admin_activity');clearAdminShellCache();render();toast(data.message||'เปลี่ยนรหัสผ่านสำเร็จ กรุณาเข้าสู่ระบบอีกครั้ง');}catch(e){toast(e.message);}finally{state.adminActionPending='';}};
   const reloadInventory = document.getElementById('reloadInventoryBtn'); if (reloadInventory) reloadInventory.onclick = () => loadAdmin();
   const inventorySearch = document.getElementById('inventorySearch'); if (inventorySearch) inventorySearch.oninput = (event) => { state.inventorySearch = event.target.value;state.inventoryVisible=100; scheduleInputRender('inventorySearch', 120); };
   const inventorySort=document.getElementById('inventorySort');if(inventorySort)inventorySort.onchange=()=>{state.inventorySort=inventorySort.value;state.inventoryVisible=100;render();};
@@ -1862,7 +1940,7 @@ function touchAdminActivity(){if(!state.adminToken)return;state.lastAdminActivit
 ['click','keydown','touchstart'].forEach(evt=>window.addEventListener(evt,()=>{if(state.page==='admin')touchAdminActivity();},{passive:true}));
 window.addEventListener('keydown',(event)=>{if(event.key!=='Escape')return;if(state.wikiGallery){event.preventDefault();closeStateModal('wiki');}else if(state.categoryEdit!==null){event.preventDefault();closeStateModal('category');}else if(state.promoEdit!==null){event.preventDefault();closeStateModal('promo');}else if(state.editRecord!==null){event.preventDefault();closeStateModal('record');}});
 window.addEventListener('beforeunload',(event)=>{if(!Object.values(state.modalDirty).some(Boolean))return;event.preventDefault();event.returnValue='';});
-setInterval(()=>{if(state.page!=='admin'||!state.adminToken)return;const mins=Number(state.adminData?.settings?.autoLockMinutes||30);if(Date.now()-Number(state.lastAdminActivity||0)>mins*60000){state.adminToken='';state.adminData=null;state.adminUser=null;sessionStorage.removeItem('dmo_admin_token');sessionStorage.removeItem('dmo_admin_user');sessionStorage.removeItem('dmo_admin_activity');render();toast('ล็อกระบบอัตโนมัติเนื่องจากไม่มีการใช้งาน');}},30000);
+setInterval(()=>{if(state.page!=='admin'||!state.adminToken)return;const mins=Number(state.adminData?.settings?.autoLockMinutes||30);if(Date.now()-Number(state.lastAdminActivity||0)>mins*60000){state.adminToken='';state.adminData=null;state.adminUser=null;sessionStorage.removeItem('dmo_admin_token');sessionStorage.removeItem('dmo_admin_user');sessionStorage.removeItem('dmo_admin_activity');clearAdminShellCache();render();toast('ล็อกระบบอัตโนมัติเนื่องจากไม่มีการใช้งาน');}},30000);
 
 window.addEventListener('beforeinstallprompt',(event)=>{event.preventDefault();state.installPrompt=event;render();});
 window.addEventListener('appinstalled',()=>{state.installPrompt=null;const {shopName}=shopIdentity();toast(`ติดตั้ง${shopName ? ` ${shopName}` : 'แอป'}แล้ว`);render();});

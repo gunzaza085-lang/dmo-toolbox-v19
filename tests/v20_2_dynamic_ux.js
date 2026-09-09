@@ -44,17 +44,29 @@ test('website messages are editable and public-safe',()=>{
 
 test('dashboard scope avoids large order/customer payloads',()=>{
   const readAdmin=gas.slice(gas.indexOf('function readAdmin('),gas.indexOf('function readPublicAction'));
-  assert(readAdmin.includes("if(scope==='dashboard')result.dashboardSummary=dashboardSummary()"),'compact dashboard summary is not used');
+  assert(readAdmin.includes("if(scope==='dashboard')")&&readAdmin.includes('dashboardSummary:dashboardSummary(forceRefresh)'),'compact dashboard summary is not used');
   assert(!readAdmin.includes("needs('dashboard','catalog")&&!readAdmin.includes("needs('dashboard','analytics")&&!readAdmin.includes("needs('dashboard','customers"),'dashboard still loads large lists');
-  const summary=gas.slice(gas.indexOf('function dashboardSummary()'),gas.indexOf('function readAdmin('));
+  const summary=gas.slice(gas.indexOf('function dashboardSummary('),gas.indexOf('function readAdmin('));
   assert(summary.includes("rowsFields(SHEETS.orders,['total','status','deletedAt'],600)")&&summary.includes("rowsFields(SHEETS.customers,['orderCount'],1500)"),'dashboard does not use narrow field reads');
   assert(summary.includes("['id','name','category','status','stock','reservedStock','lowStockAlert']")&&(summary.match(/\.filter\(x=>x\.id&&x\.name\)/g)||[]).length===3,'dashboard no longer preserves product identity filtering');
   assert(gas.includes('s=ss().getSheetByName(name)||sheet(name,HEADERS[key]||[])'),'narrow reads still repeat schema validation on every dashboard sheet');
   assert(gas.includes('if(!maxRows||lastRow<=maxRows+1){const all=s.getDataRange().getDisplayValues()'),'small dashboard sheets still split headers and rows into separate Apps Script service calls');
-  assert(readAdmin.includes('settingRows=existingRows(SHEETS.settings)')&&readAdmin.includes('userRows=existingRows(SHEETS.users)')&&readAdmin.includes('systemRows=existingRows(SHEETS.system)'),'admin base data still repeats schema validation reads');
+  assert(readAdmin.indexOf("if(scope==='dashboard')")<readAdmin.indexOf('settingRows=existingRows(SHEETS.settings)'),'dashboard still waits for full Settings/Users/System reads');
+  assert(gas.includes("cache.put(ADMIN_DASHBOARD_CACHE_KEY,JSON.stringify(result),30)"),'short dashboard summary cache is missing');
   assert(app.includes("if(state.page==='admin'){state.loading=false;render();if(state.adminToken)loadAdmin(false);}else loadData(true)"),'direct admin route still waits for storefront data');
-  assert(app.includes("state.adminToken?state.settings:{shopName:'GUN SHOP DMO',ownerName:''}"),'direct admin login leaks the legacy fallback owner identity');
+  assert(app.includes("const ADMIN_NEUTRAL_SETTINGS = Object.freeze({ shopName: 'SHOP DMO', ownerName: '' })")&&app.includes("loadedAdminSettings&&hasOwn(loadedAdminSettings,'shopName')?loadedAdminSettings:ADMIN_NEUTRAL_SETTINGS"),'direct admin shell can still flash the legacy identity');
+  assert(app.includes('ADMIN_SHELL_CACHE_KEY')&&app.includes('saveAdminShellCache(next)'),'reload does not restore a safe dashboard shell immediately');
+  assert(app.includes("payload.action === 'getAdminData' || payload.action === 'getFacebookBumpAdminData'")&&app.includes('ระบบหลังบ้านตอบกลับไม่สมบูรณ์'),'read-only backend retry or readable non-JSON error is missing');
   assert(gas.includes('parts=cache.getAll(keys)'),'public cache still reads every catalog chunk as a separate Apps Script service call');
+});
+
+test('PWA navigation prefers the current online shell',()=>{
+  const index=read('index.html'),config=read('config.js'),manifest=read('manifest.webmanifest'),serviceWorker=read('sw.js');
+  assert(index.includes('<title>SHOP DMO</title>')&&!index.includes('<title>GUN SHOP DMO</title>'),'static page title can still flash the legacy name');
+  assert(config.includes('shopName: "SHOP DMO"')&&config.includes('ownerName: ""'),'config still contains the legacy identity');
+  assert(manifest.includes('"name": "SHOP DMO"')&&!manifest.includes('"name": "GUN SHOP DMO"'),'installed PWA still uses the legacy name');
+  assert(serviceWorker.includes("request.mode==='navigate'")&&serviceWorker.includes('event.respondWith(network.catch'),'online navigation is still cache-first');
+  assert(index.includes('20260910-v20.2-admin-shell-performance-4')&&serviceWorker.includes('gun-shop-dmo-v20-2-admin-shell-performance-4'),'PWA cache version is not advanced');
 });
 
 test('storefront subcategory navigation is prominent and accessible',()=>{

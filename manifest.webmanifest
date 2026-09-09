@@ -1,6 +1,6 @@
 {
-  "name": "GUN SHOP DMO",
-  "short_name": "GUN SHOP DMO",
+  "name": "SHOP DMO",
+  "short_name": "SHOP DMO",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#071426",
@@ -18,5 +18,5 @@
       "type": "image/png"
     }
   ],
-  "description": "GUN SHOP DMO V20.2 Phase 2 Product UX, Image Management และ Performance"
+  "description": "SHOP DMO — ระบบสั่งซื้อและจัดการร้าน"
 }
