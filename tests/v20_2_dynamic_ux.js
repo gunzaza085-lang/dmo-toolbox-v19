@@ -52,7 +52,7 @@ test('dashboard scope avoids large order/customer payloads',()=>{
 
 test('pair bridge supports old and proposed origins without wildcarding',()=>{
   assert(app.includes("['appOrigin',location.origin]"),'frontend does not send its exact origin');
-  assert(worker.includes('https://gunzaza085-lang.github.io,https://shop-dmo.github.io'),'dual origin allowlist is missing');
+  assert(worker.includes("DEFAULT_ALLOWED_ORIGINS = ['https://gunzaza085-lang.github.io', 'https://shop-dmo.github.io']"),'dual origin allowlist is missing');
   assert(worker.includes('ALLOWED_ORIGINS.has(appOrigin)')&&worker.includes('pairBridgeResponse(res,await connectionStatus(),appOrigin)'),'pair target origin is not validated');
   assert(!worker.includes("Access-Control-Allow-Origin', '*'"),'worker uses wildcard CORS');
 });
