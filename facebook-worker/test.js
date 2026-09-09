@@ -183,7 +183,7 @@ async function main() {
   check(workerSource.includes('pairingStore.load()'));
   check(workerSource.includes('pairingStore.persist('));
   check(workerSource.includes('reportRemoteHeartbeat()'));
-  check(workerSource.includes("'https://gunzaza085-lang.github.io'"));
+  check(workerSource.includes("'https://gunzaza085-lang.github.io'") && workerSource.includes("'https://shop-dmo.github.io'"));
   check(!workerSource.includes('http://127.0.0.1:4173'));
   check(!workerSource.includes('stableReference('));
   check(!/C:\\Users\\Gx/i.test(`${setup}\n${start}\n${workerSource}`));

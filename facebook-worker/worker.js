@@ -26,7 +26,8 @@ const PAIRING_FILE = path.join(PROFILE_DIR, 'worker-pair.json');
 const INSTANCE_LOCK_FILE = path.join(PROFILE_DIR, 'worker-instance.lock');
 const TELEMETRY_FILE = path.join(PROFILE_DIR, 'worker-telemetry.jsonl');
 const RESULT_STORE_FILE = path.join(PROFILE_DIR, 'worker-results.json');
-const ALLOWED_ORIGINS = new Set((process.env.WORKER_ALLOWED_ORIGINS || 'https://gunzaza085-lang.github.io,https://shop-dmo.github.io').split(',').map((item) => item.trim()).filter(Boolean));
+const DEFAULT_ALLOWED_ORIGINS = ['https://gunzaza085-lang.github.io', 'https://shop-dmo.github.io'];
+const ALLOWED_ORIGINS = new Set((process.env.WORKER_ALLOWED_ORIGINS || DEFAULT_ALLOWED_ORIGINS.join(',')).split(',').map((item) => item.trim()).filter(Boolean));
 let instanceLock;
 try { instanceLock = acquireInstanceLock(INSTANCE_LOCK_FILE); }
 catch (error) { console.error(String(error && error.message || error)); process.exit(1); }
