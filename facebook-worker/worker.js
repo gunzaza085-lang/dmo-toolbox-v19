@@ -14,11 +14,14 @@ const { ResultStore } = require('./result-store');
 const { PersistentTelemetry } = require('./telemetry');
 
 const HOST = '127.0.0.1';
-const WORKER_VERSION = '20.2.1-reliability';
+const WORKER_VERSION = '20.2.2-performance';
 const PORT = Number(process.env.FACEBOOK_WORKER_PORT || 17821);
 const BACKEND_TIMEOUT_MS = Number(process.env.FACEBOOK_WORKER_BACKEND_TIMEOUT_MS || 45000);
 const POLL_INTERVAL_MS = Math.max(15000, Number(process.env.FACEBOOK_WORKER_POLL_MS || 30000));
-const HEARTBEAT_INTERVAL_MS = Math.max(15000, Number(process.env.FACEBOOK_WORKER_HEARTBEAT_MS || 30000));
+// Poll already reports the complete worker status. Keep a separate heartbeat
+// as a 60-second safety net so the two timers do not normally hit Apps Script
+// together, while remaining inside the backend's 90-second ONLINE window.
+const HEARTBEAT_INTERVAL_MS = Math.max(30000, Number(process.env.FACEBOOK_WORKER_HEARTBEAT_MS || 60000));
 const LEASE_RENEW_INTERVAL_MS = Math.max(10000, Number(process.env.FACEBOOK_WORKER_LEASE_RENEW_MS || 30000));
 const JOB_WATCHDOG_MS = Math.max(60000, Number(process.env.FACEBOOK_WORKER_JOB_WATCHDOG_MS || 210000));
 const PROFILE_DIR = portableProfileDir();
@@ -395,7 +398,7 @@ function schedule() {
   timer = setInterval(() => processOnce().catch((error) => { lastError = String(error && error.message || error).slice(0, 300); }), POLL_INTERVAL_MS);
   heartbeatTimer = setInterval(() => reportRemoteHeartbeat().catch(() => {}), HEARTBEAT_INTERVAL_MS);
   setTimeout(() => processOnce().catch((error) => { lastError = String(error && error.message || error).slice(0, 300); }), 250);
-  setTimeout(() => reportRemoteHeartbeat().catch(() => {}), 500);
+  setTimeout(() => reportRemoteHeartbeat().catch(() => {}), 15000);
 }
 
 function cors(req, res) {

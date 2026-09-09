@@ -11,13 +11,13 @@ GUN SHOP DMO — Facebook Worker (เครื่องที่สอง)
 ข้อมูลสำคัญ:
 - Browser profile จะเก็บที่ %LOCALAPPDATA%\GUN-SHOP-DMO\FacebookWorkerProfile ของ Windows เครื่องนั้นเท่านั้น ไม่อยู่ใน source/ZIP
 - Pair Token เฉพาะ Worker จะเก็บใน worker-pair.json ภายในโฟลเดอร์ profile และไม่ส่งให้หน้าเว็บ/Google Sheet
-- หลัง Pair รุ่น 3.3.1 สำเร็จ Worker จะ Pair คืนเองหลัง Restart โดยไม่ต้องใช้ Admin session เดิม
+- หลัง Pair สำเร็จ Worker จะ Pair คืนเองหลัง Restart โดยไม่ต้องใช้ Admin session เดิม
 - เปิด BackOffice จากเครื่องอื่นได้ ระบบจะอ่านสถานะ PC2 ผ่าน heartbeat และส่งคำสั่ง Test/Open กลับไปยัง PC2
 - งานเบื้องหลังจะไม่ bring Chrome ขึ้นหน้าจอ การเปิด/โฟกัส Chrome เกิดเฉพาะคำสั่งที่ผู้ใช้กดจากเครื่อง Worker
 - ต้องเปิด PC2 และโปรแกรม Worker ไว้ตลอดช่วงที่ต้องการทำงาน หาก PC2 ปิด ระบบจะไม่ส่ง Comment และ BackOffice จะแสดง Worker OFFLINE
 - ห้ามคัดลอก password, cookie หรือ browser profile ขึ้น GitHub/Google Sheet
 - ถ้าขึ้น LOGIN_REQUIRED/CHECKPOINT ให้ทำ Login/2FA/CAPTCHA ใน Chrome Worker เท่านั้น
 - ถ้าขึ้น NEEDS_REVIEW ระบบจะ Pause โพสต์นั้นอัตโนมัติเพื่อป้องกัน Duplicate ต้องตรวจ Facebook ก่อน Resume
-- รุ่น Worker ที่ต้องแสดงใน /status คือ 20.2.1-reliability
+- รุ่น Worker ที่ต้องแสดงใน /status คือ 20.2.2-performance
 - Telemetry เก็บถาวรใน worker-telemetry.jsonl และผลที่ยังรายงานไม่สำเร็จเก็บใน worker-results.json ภายใน FacebookWorkerProfile
 - ห้ามลบไฟล์ telemetry/result journal ระหว่างกู้ระบบ เพราะใช้ตัดสินว่ารอบใดส่งแล้วและป้องกันการส่งซ้ำ

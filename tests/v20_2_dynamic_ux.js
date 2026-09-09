@@ -3,7 +3,7 @@ const path=require('path');
 const vm=require('vm');
 const root=path.resolve(__dirname,'..');
 const read=name=>fs.readFileSync(path.join(root,name),'utf8');
-const app=read('app.js'),gas=read('GoogleAppsScript.gs'),worker=read('facebook-worker/worker.js');
+const app=read('app.js'),gas=read('GoogleAppsScript.gs'),facebookModule=read('FacebookBumpModule.gs'),worker=read('facebook-worker/worker.js');
 let pass=0;
 function assert(value,message){if(!value)throw Error(message);}
 function test(name,fn){try{fn();pass++;console.log(`PASS ${name}`);}catch(error){console.error(`FAIL ${name} — ${error.message}`);process.exitCode=1;}}
@@ -47,7 +47,41 @@ test('dashboard scope avoids large order/customer payloads',()=>{
   assert(readAdmin.includes("if(scope==='dashboard')result.dashboardSummary=dashboardSummary()"),'compact dashboard summary is not used');
   assert(!readAdmin.includes("needs('dashboard','catalog")&&!readAdmin.includes("needs('dashboard','analytics")&&!readAdmin.includes("needs('dashboard','customers"),'dashboard still loads large lists');
   const summary=gas.slice(gas.indexOf('function dashboardSummary()'),gas.indexOf('function readAdmin('));
-  assert(summary.includes('rowsTail(SHEETS.orders,600)')&&summary.includes('rowsTail(SHEETS.customers,1500)'),'dashboard backend still scans full order/customer sheets');
+  assert(summary.includes("rowsFields(SHEETS.orders,['total','status','deletedAt'],600)")&&summary.includes("rowsFields(SHEETS.customers,['orderCount'],1500)"),'dashboard does not use narrow field reads');
+  assert(summary.includes("['id','name','category','status','stock','reservedStock','lowStockAlert']")&&(summary.match(/\.filter\(x=>x\.id&&x\.name\)/g)||[]).length===3,'dashboard no longer preserves product identity filtering');
+  assert(app.includes("if(state.page==='admin'){state.loading=false;render();if(state.adminToken)loadAdmin(false);}else loadData(true)"),'direct admin route still waits for storefront data');
+  assert(app.includes("state.adminToken?state.settings:{shopName:'GUN SHOP DMO',ownerName:''}"),'direct admin login leaks the legacy fallback owner identity');
+});
+
+test('storefront subcategory navigation is prominent and accessible',()=>{
+  ['subcategory-filter','subcategory-filter-title','subcategory-chip','aria-pressed'].forEach(marker=>assert(app.includes(marker)||read('app.css').includes(marker),`subcategory UX marker missing: ${marker}`));
+  const css=read('app.css');
+  assert(css.includes('.subcategory-chip{min-height:44px')&&css.includes('.subcategory-chip.active::before'),'subcategory touch target or active state is unclear');
+  assert(css.includes('@media(max-width:760px)')&&css.includes('.subcategory-filter-options{overflow-x:auto'),'mobile subcategory layout is missing');
+});
+
+test('theme settings are public-safe, validated and previewable',()=>{
+  ['themePrimaryColor','themeAccentColor','themeBackgroundColor','themeButtonColor','themeImportantColor'].forEach(key=>assert(gas.includes(key)&&app.includes(key),`theme setting missing: ${key}`));
+  assert(app.includes('function previewThemeFromForm()')&&app.includes('restoreThemeDefaultsBtn'),'theme preview or restore default is missing');
+  assert(gas.includes("if(!/^#[0-9A-F]{6}$/.test(value))value=DEFAULT_SETTINGS[k]"),'server does not reject invalid theme colors safely');
+  const themeSource=app.slice(app.indexOf('const DEFAULT_THEME_COLORS'),app.indexOf('function settingEnabled'));
+  const context={state:{adminData:null,settings:{}},document:{documentElement:{style:{setProperty(){}}},querySelector(){return null;}},String,Object,Math,parseInt};vm.createContext(context);
+  new vm.Script(`${themeSource};globalThis.__theme={themePalette,themeContrast,readableThemeText};`).runInContext(context);
+  const unsafeLight=context.__theme.themePalette({themeDefault:'LIGHT',themeAccentColor:'#FFFFFF',themeImportantColor:'#FFFFFF'},'LIGHT');
+  assert(context.__theme.themeContrast(unsafeLight.important,'#FFFFFF')>=4.5,'important text can disappear on a light surface');
+  assert(context.__theme.themeContrast(unsafeLight.accent,'#FFFFFF')>=3,'accent can disappear on a light surface');
+  assert(context.__theme.readableThemeText('#FFFFFF')==='#071426'&&context.__theme.readableThemeText('#000000')==='#FFFFFF','button text contrast selection is unsafe');
+  const css=read('app.css');
+  assert(css.includes('body{background:var(--bg);background:')&&css.includes(':root[data-theme="LIGHT"] .btn.primary'),'custom background or LIGHT theme cascade is incomplete');
+  assert(css.includes('background:var(--blue);border-color:var(--cyan);color:var(--primary-text'),'active buttons do not use the validated palette');
+});
+
+test('worker heartbeat avoids redundant database work and timer collisions',()=>{
+  assert(gas.includes("if(body.action!=='reportFacebookWorkerStatus')ensureDatabase()"),'heartbeat still performs full database readiness work');
+  assert(worker.includes('FACEBOOK_WORKER_HEARTBEAT_MS || 60000')&&worker.includes('reportRemoteHeartbeat().catch(() => {}), 15000'),'worker heartbeat remains aligned with the 30-second poll');
+  assert(facebookModule.includes('FACEBOOK_WORKER_HEARTBEAT_TTL_MS=90000'),'backend online safety window changed unexpectedly');
+  assert(facebookModule.includes('FACEBOOK_BUMP_IDLE_CLAIM_AUDIT_SECONDS=300')&&facebookModule.includes("idleReason&&!facebookBumpIdleClaimAuditDue()"),'idle Worker claims still rescan Queue/Posts every 30 seconds');
+  assert(worker.includes("WORKER_VERSION = '20.2.2-performance'"),'worker package version was not advanced for PC2 verification');
 });
 
 test('pair bridge supports old and proposed origins without wildcarding',()=>{

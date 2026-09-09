@@ -13,6 +13,7 @@ const FACEBOOK_WORKER_COMMAND_PROPERTY='FACEBOOK_BUMP_REMOTE_WORKER_COMMAND';
 const FACEBOOK_WORKER_AUTH_PROPERTY='FACEBOOK_BUMP_WORKER_AUTH_V1';
 const FACEBOOK_WORKER_HEARTBEAT_TTL_MS=90000;
 const FACEBOOK_BUMP_LEASE_MS=180000;
+const FACEBOOK_BUMP_IDLE_CLAIM_AUDIT_SECONDS=300;
 
 function ensureFacebookBumpDatabase(){
   const cache=CacheService.getScriptCache(),cacheKey='facebook-bump-ready-'+DATABASE_VERSION,properties=PropertiesService.getScriptProperties(),persistentKey='FACEBOOK_BUMP_SCHEMA_READY_'+DATABASE_VERSION.replace(/\W/g,'_');
@@ -63,6 +64,8 @@ function facebookBumpBoolean(value){return value===true||value===1||String(value
 function facebookBumpDateValue(value){const time=value instanceof Date?value.getTime():new Date(value||0).getTime();return Number.isFinite(time)?time:0;}
 function facebookBumpIso(value){const time=facebookBumpDateValue(value);return time?new Date(time).toISOString():'';}
 function facebookBumpWithLock(fn){if(typeof LockService==='undefined')return fn();const lock=LockService.getScriptLock();if(!lock.tryLock(15000))throw Error('FACEBOOK_BUSY_RETRY');try{return fn();}finally{lock.releaseLock();}}
+function facebookBumpIdleClaimAuditDue(){return typeof CacheService==='undefined'||CacheService.getScriptCache().get('facebook-bump-idle-claim-audit-v1')!=='TRUE';}
+function facebookBumpMarkIdleClaimAudit(){if(typeof CacheService!=='undefined')CacheService.getScriptCache().put('facebook-bump-idle-claim-audit-v1','TRUE',FACEBOOK_BUMP_IDLE_CLAIM_AUDIT_SECONDS);}
 function facebookBumpCommentKey(value){const text=String(value||'');if(/^\d+$/.test(text))return text;const match=text.match(/[?&](?:comment_id|reply_comment_id)=([^&#]+)/i);if(!match)return'';try{return decodeURIComponent(match[1]);}catch(error){return match[1];}}
 function facebookBumpLeaseExpiry(job){const explicit=facebookBumpDateValue(job&&job.leaseExpiresAt);return explicit||facebookBumpDateValue(job&&job.updatedAt)+300000;}
 function facebookBumpLeaseMatches(job,body){const expected=String(job&&job.leaseToken||''),actual=String(body&&body.leaseToken||'');return expected?actual===expected:!actual;}
@@ -241,8 +244,9 @@ function saveFacebookBumpSettings(body,actor){return withLock(()=>{
 });}
 
 function claimFacebookBumpJob(body,actor){return facebookBumpWithLock(()=>{
-  const now=new Date(),workerStatus=facebookBumpStoreWorkerStatus(body.workerStatus||{},actor),settings=facebookBumpSettings(),queue=facebookBumpRows(SHEETS.facebookBumpQueue),posts=facebookBumpRows(SHEETS.facebookBumpPosts);facebookBumpRecoverStaleJobs(queue,posts,now);
-  const command=facebookBumpClaimWorkerCommand(actor);if(command)return output({ok:true,job:null,reason:'REMOTE_COMMAND',command});if(workerStatus.connection!=='CONNECTED')return output({ok:true,job:null,reason:workerStatus.connection||'FACEBOOK_NOT_CONNECTED'});if(settings.mode!=='REAL')return output({ok:true,job:null,reason:'DRY_RUN'});if(settings.paused)return output({ok:true,job:null,reason:'PAUSED'});if(facebookBumpDateValue(settings.nextJobAllowedAt)>now.getTime())return output({ok:true,job:null,reason:'DELAY'});
+  const now=new Date(),workerStatus=facebookBumpStoreWorkerStatus(body.workerStatus||{},actor),settings=facebookBumpSettings(),command=facebookBumpClaimWorkerCommand(actor);if(command)return output({ok:true,job:null,reason:'REMOTE_COMMAND',command});
+  const idleReason=workerStatus.connection!=='CONNECTED'?(workerStatus.connection||'FACEBOOK_NOT_CONNECTED'):settings.mode!=='REAL'?'DRY_RUN':settings.paused?'PAUSED':'';if(idleReason&&!facebookBumpIdleClaimAuditDue())return output({ok:true,job:null,reason:idleReason});
+  const queue=facebookBumpRows(SHEETS.facebookBumpQueue),posts=facebookBumpRows(SHEETS.facebookBumpPosts);facebookBumpRecoverStaleJobs(queue,posts,now);if(idleReason){facebookBumpMarkIdleClaimAudit();return output({ok:true,job:null,reason:idleReason});}if(facebookBumpDateValue(settings.nextJobAllowedAt)>now.getTime())return output({ok:true,job:null,reason:'DELAY'});
   const job=facebookBumpSelectNextPending(queue,now);if(!job)return output({ok:true,job:null,reason:'EMPTY'});
   const post=posts.find(item=>String(item.id)===String(job.targetPostId)&&!item.deletedAt&&facebookBumpBoolean(item.enabled));if(!post){job.status='CANCELLED';job.error='POST_NOT_AVAILABLE';job.updatedAt=now;facebookBumpWriteRow(SHEETS.facebookBumpQueue,job);return output({ok:true,job:null,reason:'POST_NOT_AVAILABLE'});}
   if(facebookBumpExpired(post,now)){facebookBumpExpirePosts([post],queue,now);return output({ok:true,job:null,reason:'POST_RUN_EXPIRED'});}

@@ -54,23 +54,24 @@ const DEFAULT_SETTINGS = {
   orderSubmitCooldownSeconds:30, orderRateWindowSeconds:300, orderRateMax:3,
   sessionDays:7, autoLockMinutes:30, apiKey:'',
   backupEnabled:'TRUE', backupHour:3, backupRetention:14, alertLowStock:'TRUE', alertNewOrders:'TRUE',
-  themeDefault:'DARK', enablePWA:'TRUE', offlineCacheHours:12, mobileCompact:'TRUE', showMobileBottomNav:'TRUE',
+  themeDefault:'DARK', themePrimaryColor:'#1689D7', themeAccentColor:'#22C4DF', themeBackgroundColor:'#050B14', themeButtonColor:'#0B1C34', themeImportantColor:'#45DEF2',
+  enablePWA:'TRUE', offlineCacheHours:12, mobileCompact:'TRUE', showMobileBottomNav:'TRUE',
   orderSuccessMessage:'ส่งรายการให้ทางร้านเรียบร้อยแล้ว ทางร้านจะตรวจสอบสต๊อกและจัดรายการให้', orderPrefix:'GUN',
   facebookBumpDefaultInterval:60, facebookBumpDefaultMessage:'+', facebookBumpDelaySeconds:30,
   facebookBumpCleanupOld:'TRUE', facebookBumpPaused:'TRUE', facebookBumpDryRun:'TRUE', facebookBumpMode:'DRY_RUN', facebookBumpNextJobAllowedAt:''
 };
 
-const DATABASE_VERSION='3.3.1';
+const DATABASE_VERSION='3.3.2';
 const MONEY_T_PRODUCT_ID='TMONEY-001';
 const MONEY_T_CATEGORY='MONEY_T';
 
 const PUBLIC_PRODUCT_FIELDS=['id','kind','name','aliases','category','section','itemCategory','serviceCategory','description','price','unit','packSize','status','imageUrl','wikiName','badge','sortOrder','wikiTitle','wikiUrl','tags','searchKeywords'];
-const PUBLIC_SETTING_FIELDS=['shopName','ownerName','promoThreshold','promoReward','categoryDiscountSealPercent','categoryDiscountItemPercent','categoryDiscountServicePercent','orderNotice','orderCopyTemplate','orderCopyShowItems','orderCopyShowPricing','orderCopyShowCategoryDiscounts','orderCopyShowPromotions','orderCopyShowD2','orderCopyShowCustomer','orderCopyShowNotice','websiteIntroText','websiteAnnouncement','websitePromotionText','websiteImportantNotice','productSubcategoriesJson','autoRefreshSeconds','allowOrderSave','showStock','facebookUrl','lineUrl','servicePosterUrl','orderSubmitCooldownSeconds','themeDefault','enablePWA','offlineCacheHours','mobileCompact','showMobileBottomNav','orderSuccessMessage'];
+const PUBLIC_SETTING_FIELDS=['shopName','ownerName','promoThreshold','promoReward','categoryDiscountSealPercent','categoryDiscountItemPercent','categoryDiscountServicePercent','orderNotice','orderCopyTemplate','orderCopyShowItems','orderCopyShowPricing','orderCopyShowCategoryDiscounts','orderCopyShowPromotions','orderCopyShowD2','orderCopyShowCustomer','orderCopyShowNotice','websiteIntroText','websiteAnnouncement','websitePromotionText','websiteImportantNotice','productSubcategoriesJson','autoRefreshSeconds','allowOrderSave','showStock','facebookUrl','lineUrl','servicePosterUrl','orderSubmitCooldownSeconds','themeDefault','themePrimaryColor','themeAccentColor','themeBackgroundColor','themeButtonColor','themeImportantColor','enablePWA','offlineCacheHours','mobileCompact','showMobileBottomNav','orderSuccessMessage'];
 const PUBLIC_PROMOTION_FIELDS=['promotionId','name','type','value','minSpend','buyQty','freeQty','rewardText','startAt','endAt','status','priority','stackable','scope'];
 const ORDER_TRANSITIONS={NEW:['CHECKING','CANCELLED'],CHECKING:['PREPARING','CANCELLED'],PREPARING:['READY','CANCELLED'],READY:['COMPLETED','CANCELLED'],COMPLETED:[],CANCELLED:[]};
 const PASSWORD_ALGO='ITERATED-HMAC-SHA256-6000';
 const KNOWN_INSECURE_OWNER_HASH='77acc467d71ca17d5a480aa17d8b0b05d536139a61c99a08d1573dd81eab7d03';
-const PUBLIC_CACHE_KEY='public-catalog-v20-2-dynamic-settings-1';
+const PUBLIC_CACHE_KEY='public-catalog-v20-2-theme-performance-2';
 const PRODUCTION_SPREADSHEET_ID='1AXYpPnrBRQPYhdDYODV80S4UTz5-gLEXIO_Jn8Rt-sM';
 const TEST_SPREADSHEET_ID='1WPtJgFe7jswHafieD7zJ19pjSxrdFZACT4iLCi_PfLM';
 const PUBLIC_CACHE_MUTATIONS=['createOrder','upsert','delete','softDelete','restoreTrash','permanentDelete','bulkUpdate','saveSettings','adjustStock','setStock','upsertPromotion','deletePromotion','updateOrder','applyImageZip'];
@@ -97,7 +98,10 @@ function doPost(e){
     if(body.action==='logout') return logout(body.token);
     const facebookWorkerActions=['reportFacebookWorkerStatus','reportFacebookBumpTelemetry','claimFacebookBumpJob','renewFacebookBumpJobLease','completeFacebookWorkerCommand','completeFacebookBumpJob','failFacebookBumpJob','disconnectFacebookWorker'];
     if(facebookWorkerActions.includes(body.action)){
-      ensureDatabase();
+      // A heartbeat only touches Script Properties. Avoid scanning/creating the
+      // spreadsheet schema every 30 seconds; job, lease and recovery actions
+      // keep the full database readiness guard.
+      if(body.action!=='reportFacebookWorkerStatus')ensureDatabase();
       const workerActor=facebookBumpRequireWorker(body.token);
       if(body.action==='reportFacebookWorkerStatus')return reportFacebookWorkerStatus(body,workerActor);
       if(body.action==='reportFacebookBumpTelemetry')return reportFacebookBumpTelemetry(body,workerActor);
@@ -384,6 +388,12 @@ function rowsTail(name,limit){
   const h=s.getRange(1,1,1,lastCol).getDisplayValues()[0].map(x=>String(x).trim()),start=Math.max(2,lastRow-Math.max(1,number(limit))+1),vals=s.getRange(start,1,lastRow-start+1,lastCol).getDisplayValues();
   return vals.map(r=>{const o={};h.forEach((k,i)=>{if(k)o[k]=r[i];});return o;}).filter(o=>Object.keys(o).some(k=>String(o[k]??'').trim()!==''));
 }
+function rowsFields(name,fields,limit){
+  const key=Object.keys(SHEETS).find(k=>SHEETS[k]===name),s=sheet(name,HEADERS[key]||[]),lastRow=s.getLastRow(),lastCol=s.getLastColumn(),wanted=(fields||[]).map(String);if(lastRow<2||lastCol<1||!wanted.length)return[];
+  const headers=s.getRange(1,1,1,lastCol).getDisplayValues()[0].map(x=>String(x).trim()),columns=wanted.map(field=>headers.indexOf(field)).filter(index=>index>=0);if(!columns.length)return[];
+  const minColumn=Math.min(...columns),maxColumn=Math.max(...columns),start=limit?Math.max(2,lastRow-Math.max(1,number(limit))+1):2,values=s.getRange(start,minColumn+1,lastRow-start+1,maxColumn-minColumn+1).getDisplayValues();
+  return values.map(row=>{const out={};wanted.forEach(field=>{const column=headers.indexOf(field);if(column>=minColumn&&column<=maxColumn)out[field]=row[column-minColumn];});return out;}).filter(out=>wanted.some(field=>String(out[field]??'').trim()!==''));
+}
 function existingRows(name){const s=ss().getSheetByName(name);return s?readSheetFlexible(s):[];}
 function pickFields(source,fields){const out={};fields.forEach(k=>{if(source[k]!==undefined)out[k]=source[k];});return out;}
 function publicProduct(product){const out=pickFields(product,PUBLIC_PRODUCT_FIELDS);out.availableStock=availableQty(product.stock,product.reservedStock);Object.keys(out).forEach(k=>{if(out[k]===undefined||out[k]===null||out[k]===''||(Array.isArray(out[k])&&!out[k].length))delete out[k];});return out;}
@@ -401,8 +411,8 @@ function readPublic(){
   const result={seals,gameItems,services,moneyT:moneyT?publicProduct(moneyT):null,settings:publicSettings(),promotions,stockUpdatedAt:stockUpdatedAt()};putCachedPublic(result);return result;
 }
 function dashboardSummary(){
-  const seals=rows(SHEETS.seals).filter(x=>x.id&&x.name).map(normalizeSeal),allItems=rows(SHEETS.items).filter(x=>x.id&&x.name).map(normalizeItem),services=rows(SHEETS.services).filter(x=>x.id&&x.name).map(normalizeService),products=seals.concat(allItems,services);
-  const orders=rowsTail(SHEETS.orders,600).reverse().filter(x=>!x.deletedAt).slice(0,500),customers=rowsTail(SHEETS.customers,1500).reverse(),customerCount=Math.max(0,sheet(SHEETS.customers,HEADERS.customers).getLastRow()-1),promotions=rows(SHEETS.promotions).map(normalizePromotion),available=p=>availableQty(p.stock,p.reservedStock),status=x=>String(x.status||'ACTIVE');
+  const seals=rowsFields(SHEETS.seals,['id','name','category','status','stock','reservedStock','lowStockAlert']).filter(x=>x.id&&x.name),allItems=rowsFields(SHEETS.items,['id','name','status','stock','reservedStock','lowStockAlert']).filter(x=>x.id&&x.name),services=rowsFields(SHEETS.services,['id','name','status','stock']).filter(x=>x.id&&x.name),products=seals.concat(allItems,services);
+  const orders=rowsFields(SHEETS.orders,['total','status','deletedAt'],600).reverse().filter(x=>!x.deletedAt).slice(0,500),customers=rowsFields(SHEETS.customers,['orderCount'],1500).reverse(),customerCount=Math.max(0,sheet(SHEETS.customers,HEADERS.customers).getLastRow()-1),promotions=rowsFields(SHEETS.promotions,['promotionId','name','status']),available=p=>availableQty(p.stock,p.reservedStock),status=x=>String(x.status||'ACTIVE');
   const completed=orders.filter(x=>status(x)==='COMPLETED');
   return{
     newOrders:orders.filter(x=>status(x)==='NEW').length,
@@ -587,8 +597,8 @@ function normalizeProductSubcategories(value){
   return out;
 }
 function saveSettings(settingsObj,actor){return withLock(()=>{
-  const s=sheet(SHEETS.settings,HEADERS.settings),values=s.getDataRange().getValues(),rowByKey=new Map(),categoryDiscountKeys=new Set(['categoryDiscountSealPercent','categoryDiscountItemPercent','categoryDiscountServicePercent']);for(let i=1;i<values.length;i++)rowByKey.set(String(values[i][0]),i+1);
-  Object.keys(settingsObj||{}).forEach(k=>{let value=categoryDiscountKeys.has(k)?Math.max(0,Math.min(100,number(settingsObj[k]))):settingsObj[k];if(k==='productSubcategoriesJson')value=JSON.stringify(normalizeProductSubcategories(value));if(k==='orderCopyTemplate')value=safeSheetText(String(value||''),12000);if(['websiteIntroText','websiteAnnouncement','websitePromotionText','websiteImportantNotice'].includes(k))value=safeSheetText(String(value||''),3000);const row=rowByKey.get(k);if(!row){s.appendRow([k,value,'']);rowByKey.set(k,s.getLastRow());}else s.getRange(row,2).setValue(value);if(categoryDiscountKeys.has(k))s.getRange(rowByKey.get(k),2).setNumberFormat('0.##');});if(Object.prototype.hasOwnProperty.call(settingsObj||{},'sessionDays'))PropertiesService.getScriptProperties().setProperty('SESSION_DAYS',String(settingsObj.sessionDays));
+  const s=sheet(SHEETS.settings,HEADERS.settings),values=s.getDataRange().getValues(),rowByKey=new Map(),categoryDiscountKeys=new Set(['categoryDiscountSealPercent','categoryDiscountItemPercent','categoryDiscountServicePercent']),themeColorKeys=new Set(['themePrimaryColor','themeAccentColor','themeBackgroundColor','themeButtonColor','themeImportantColor']);for(let i=1;i<values.length;i++)rowByKey.set(String(values[i][0]),i+1);
+  Object.keys(settingsObj||{}).forEach(k=>{let value=categoryDiscountKeys.has(k)?Math.max(0,Math.min(100,number(settingsObj[k]))):settingsObj[k];if(themeColorKeys.has(k)){value=String(value||'').trim().toUpperCase();if(!/^#[0-9A-F]{6}$/.test(value))value=DEFAULT_SETTINGS[k];}if(k==='themeDefault')value=String(value).toUpperCase()==='LIGHT'?'LIGHT':'DARK';if(k==='productSubcategoriesJson')value=JSON.stringify(normalizeProductSubcategories(value));if(k==='orderCopyTemplate')value=safeSheetText(String(value||''),12000);if(['websiteIntroText','websiteAnnouncement','websitePromotionText','websiteImportantNotice'].includes(k))value=safeSheetText(String(value||''),3000);const row=rowByKey.get(k);if(!row){s.appendRow([k,value,'']);rowByKey.set(k,s.getLastRow());}else s.getRange(row,2).setValue(value);if(categoryDiscountKeys.has(k))s.getRange(rowByKey.get(k),2).setNumberFormat('0.##');});if(Object.prototype.hasOwnProperty.call(settingsObj||{},'sessionDays'))PropertiesService.getScriptProperties().setProperty('SESSION_DAYS',String(settingsObj.sessionDays));
   log('SETTINGS','SYSTEM','','',actor||'SYSTEM');return output({ok:true});
 });}
 function productSaleUnit(product){return String(product.unit||((product.kind||'')==='SEAL'?'ชุด':(product.kind||'')==='TMONEY'?'T':'ชิ้น'));}

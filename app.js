@@ -65,7 +65,7 @@ const state = {
   reportRange: '30',
   automationTab: 'ALERTS',
   wikiLookup: { query: '', results: [], loading: false, target: null },
-  theme: localStorage.getItem('dmo_theme') || 'DARK',
+  theme: localStorage.getItem('dmo_theme') || '',
   offline: false,
   installPrompt: null,
   orderSuccess: null,
@@ -193,6 +193,17 @@ const DEFAULT_PRODUCT_SUBCATEGORIES=[
   {id:'SEAL-SUSA',kind:'SEAL',value:'SUSA',label:'ซูซา',sortOrder:30,enabled:true},
 ];
 const DEFAULT_ORDER_COPY_TEMPLATE='{title}\n{items}\n{pricing}\n{promotions}\n{customer}\n{notice}';
+const DEFAULT_THEME_COLORS={primary:'#1689D7',accent:'#22C4DF',background:'#050B14',button:'#0B1C34',important:'#45DEF2'};
+function normalizeThemeColor(value,fallback){const color=String(value||'').trim().toUpperCase();return /^#[0-9A-F]{6}$/.test(color)?color:fallback;}
+function themeRgb(color){const value=normalizeThemeColor(color,'#000000').slice(1);return[0,2,4].map(index=>parseInt(value.slice(index,index+2),16));}
+function themeLuminance(color){return themeRgb(color).map(value=>{const channel=value/255;return channel<=.03928?channel/12.92:Math.pow((channel+.055)/1.055,2.4);}).reduce((sum,value,index)=>sum+value*[.2126,.7152,.0722][index],0);}
+function themeContrast(first,second){const a=themeLuminance(first),b=themeLuminance(second);return(Math.max(a,b)+.05)/(Math.min(a,b)+.05);}
+function readableThemeText(background){return themeContrast(background,'#FFFFFF')>=4.5?'#FFFFFF':'#071426';}
+function themeSurface(theme){return String(theme).toUpperCase()==='LIGHT'?'#FFFFFF':'#0C1B2E';}
+function safeThemeAccent(color,theme){const candidate=normalizeThemeColor(color,DEFAULT_THEME_COLORS.accent),surface=themeSurface(theme);return themeContrast(candidate,surface)>=3?candidate:(String(theme).toUpperCase()==='LIGHT'?'#075985':DEFAULT_THEME_COLORS.accent);}
+function safeThemeImportant(color,theme){const candidate=normalizeThemeColor(color,DEFAULT_THEME_COLORS.important),surface=themeSurface(theme);return themeContrast(candidate,surface)>=4.5?candidate:readableThemeText(surface);}
+function themePalette(settings=state.adminData?.settings||state.settings||{},themeMode){const theme=String(themeMode||settings.themeDefault||'DARK').toUpperCase()==='LIGHT'?'LIGHT':'DARK';return{primary:normalizeThemeColor(settings.themePrimaryColor,DEFAULT_THEME_COLORS.primary),accent:safeThemeAccent(settings.themeAccentColor,theme),background:normalizeThemeColor(settings.themeBackgroundColor,DEFAULT_THEME_COLORS.background),button:normalizeThemeColor(settings.themeButtonColor,DEFAULT_THEME_COLORS.button),important:safeThemeImportant(settings.themeImportantColor,theme)};}
+function applyThemePalette(palette){const root=document.documentElement;root.style.setProperty('--blue',palette.primary);root.style.setProperty('--cyan',palette.accent);root.style.setProperty('--bg',palette.background);root.style.setProperty('--button-bg',palette.button);root.style.setProperty('--button-text',readableThemeText(palette.button));root.style.setProperty('--primary-text',readableThemeText(palette.primary));root.style.setProperty('--important',palette.important);const meta=document.querySelector('meta[name="theme-color"]');if(meta)meta.content=palette.background;}
 function settingEnabled(settings,key,fallback=true){if(!hasOwn(settings,key))return fallback;return settings[key]!==false&&String(settings[key]).toUpperCase()!=='FALSE';}
 function productSubcategoryValue(product){if(product.kind==='SEAL')return String(product.section||'').trim();if(product.kind==='SERVICE')return String(product.serviceCategory||'').trim();if(product.kind==='ITEM')return String(product.itemCategory||'').trim();return'';}
 function productSubcategorySettings(settings=state.adminData?.settings||state.settings){
@@ -330,8 +341,9 @@ function customerNav() {
 }
 
 
-function applyTheme(){const theme=String(state.theme||state.settings.themeDefault||'DARK').toUpperCase();document.documentElement.dataset.theme=theme;localStorage.setItem('dmo_theme',theme);}
-function toggleTheme(){state.theme=String(state.theme).toUpperCase()==='LIGHT'?'DARK':'LIGHT';applyTheme();render();}
+function applyTheme(){const settings=state.adminData?.settings||state.settings||{},theme=String(state.theme||settings.themeDefault||'DARK').toUpperCase()==='LIGHT'?'LIGHT':'DARK';document.documentElement.dataset.theme=theme;if(state.theme)localStorage.setItem('dmo_theme',theme);applyThemePalette(themePalette(settings,theme));}
+function toggleTheme(){const current=String(document.documentElement.dataset.theme||state.theme||state.settings.themeDefault||'DARK').toUpperCase();state.theme=current==='LIGHT'?'DARK':'LIGHT';applyTheme();render();}
+function previewThemeFromForm(){const get=(id,fallback)=>document.getElementById(id)?.value||fallback,theme=get('setThemeDefault','DARK')==='LIGHT'?'LIGHT':'DARK',settings={themeDefault:theme,themePrimaryColor:get('setThemePrimary',''),themeAccentColor:get('setThemeAccent',''),themeBackgroundColor:get('setThemeBackground',''),themeButtonColor:get('setThemeButton',''),themeImportantColor:get('setThemeImportant','')};document.documentElement.dataset.theme=theme;applyThemePalette(themePalette(settings,theme));}
 async function installPwa(){if(!state.installPrompt)return toast('อุปกรณ์นี้ยังไม่แสดงตัวเลือกติดตั้ง');state.installPrompt.prompt();try{await state.installPrompt.userChoice;}catch(e){}state.installPrompt=null;render();}
 
 function applyAdminRoleGuards(){
@@ -350,8 +362,9 @@ function applyAdminRoleGuards(){
 
 function render() {
   applyTheme();
-  const { shopName, ownerName } = shopIdentity();
   const adminMode = state.page === 'admin';
+  const displaySettings=adminMode?(state.adminData?.settings||(state.adminToken?state.settings:{shopName:'GUN SHOP DMO',ownerName:''})):state.settings;
+  const { shopName, ownerName } = shopIdentity(displaySettings);
   const documentName = shopName || 'ระบบสั่งซื้อและตรวจสต๊อก';
   document.title = ownerName ? `${documentName} — ${ownerName}` : documentName;
   const description = document.querySelector('meta[name="description"]');
@@ -364,7 +377,7 @@ function render() {
         <p>${adminMode ? 'ระบบจัดการร้านสำหรับเจ้าของร้าน' : html(configuredSettingText(state.settings,'websiteIntroText','เลือกสินค้า • ส่งออเดอร์เข้าหลังบ้าน • รอร้านตรวจสอบก่อนชำระเงิน'))}</p>
         <div class="brand-owner">${ownerName ? `<span class="owner-badge">👤 เจ้าของร้าน <strong>${html(ownerName)}</strong></span>` : ''}<span>${shopName ? `${html(shopName)} • ` : ''}ระบบสั่งซื้อและตรวจสต๊อก</span></div>
       </div>
-      <div class="hero-actions"><div class="data-badge">${state.loading ? '<span class="loading"></span>' : (state.offline?'Offline Cache':'Google Sheets')}<br>${state.updatedAt ? new Date(state.updatedAt).toLocaleString('th-TH') : ''}</div><button class="icon-btn" id="themeToggleBtn" title="สลับธีม">${String(state.theme).toUpperCase()==='LIGHT'?'🌙':'☀️'}</button>${state.installPrompt?'<button class="btn small" id="installPwaBtn">📲 ติดตั้ง</button>':''}</div>
+      <div class="hero-actions"><div class="data-badge">${state.loading ? '<span class="loading"></span>' : (state.offline?'Offline Cache':'Google Sheets')}<br>${state.updatedAt ? new Date(state.updatedAt).toLocaleString('th-TH') : ''}</div><button class="icon-btn" id="themeToggleBtn" title="สลับธีม">${String(document.documentElement.dataset.theme).toUpperCase()==='LIGHT'?'🌙':'☀️'}</button>${state.installPrompt?'<button class="btn small" id="installPwaBtn">📲 ติดตั้ง</button>':''}</div>
     </section>
     ${adminMode ? '' : customerNav()}
     ${state.orderSuccess && !adminMode ? orderSuccessPanel() : ''}
@@ -463,7 +476,7 @@ function shopPage() {
         <div class="smart-search-wrap"><input class="search" id="searchInput" autocomplete="off" placeholder="ค้นหาชื่อ Alias สาย หรือพิมพ์คลาดเคลื่อนได้..." value="${html(state.search)}">${state.search ? `<button class="search-clear" id="searchClearBtn">×</button>` : ''}${suggestions.length ? `<div class="search-suggestions">${suggestions.map((p)=>`<button data-search-suggestion="${html(p.name)}" data-search-product="${html(productKey(p))}"><b>${html(p.name)}</b><span>${html(productMeta(p))}</span></button>`).join('')}</div>` : ''}</div>
         ${state.recentSearches.length ? `<div class="recent-searches"><span>ค้นหาล่าสุด:</span>${state.recentSearches.map((q)=>`<button data-recent-search="${html(q)}">${html(q)}</button>`).join('')}<button id="clearRecentSearches">ล้าง</button></div>` : ''}
         ${state.catalogType === 'SEAL' ? `<div class="chip-row">${['ALL', 'AT', 'HT', 'CT', 'HP', 'DS', 'DE', 'EV', 'BL'].map((category) => `<button class="filter-chip ${state.category === category ? 'active' : ''}" data-cat="${category}">${category === 'ALL' ? 'ทั้งหมด' : category}</button>`).join('')}</div>` : ''}
-        ${subcategories.length?`<div class="chip-row"><button class="filter-chip ${state.section==='ALL'?'active':''}" data-sec="ALL">ทุกหมวดย่อย</button>${subcategories.map(row=>`<button class="filter-chip ${state.section===row.value?'active':''}" data-sec="${html(row.value)}">${html(row.label)}</button>`).join('')}</div>`:''}
+        ${subcategories.length?`<div class="subcategory-filter" aria-label="เลือกหมวดย่อย"><div class="subcategory-filter-title"><b>หมวดย่อย</b><span>เลือกเพื่อกรองสินค้า</span></div><div class="chip-row subcategory-filter-options"><button class="filter-chip subcategory-chip ${state.section==='ALL'?'active':''}" data-sec="ALL" aria-pressed="${state.section==='ALL'}">ทุกหมวดย่อย</button>${subcategories.map(row=>`<button class="filter-chip subcategory-chip ${state.section===row.value?'active':''}" data-sec="${html(row.value)}" aria-pressed="${state.section===row.value}">${html(row.label)}</button>`).join('')}</div></div>`:''}
       </div>
       ${servicePosterUrl?`<div class="service-poster"><img src="${html(servicePosterUrl)}" alt="โปสเตอร์บริการ" loading="lazy" decoding="async" onerror="this.closest('.service-poster').hidden=true"></div>`:''}
       <div class="search-summary">พบ ${products.length} รายการ${state.search ? ` สำหรับ “${html(state.search)}”` : ''}${products.length>visibleProducts.length?` • แสดง ${visibleProducts.length} รายการแรก`:''}</div><div class="products">${products.length ? visibleProducts.map(productCard).join('') : '<div class="empty"><b>ไม่พบสินค้า</b><span>ลองตรวจคำสะกด เปลี่ยนหมวด หรือค้นด้วยชื่อเรียกอื่น</span><button class="btn small" id="emptyResetBtn">ล้างการค้นหา</button></div>'}</div>${products.length>visibleProducts.length?`<button class="btn load-more" id="loadMoreProductsBtn">แสดงเพิ่มอีก ${Math.min(60,products.length-visibleProducts.length)} รายการ</button>`:''}
@@ -1270,10 +1283,16 @@ function categoryModal(){
   return `<div class="modal-backdrop" id="categoryBackdrop"><div class="modal compact-modal" role="dialog" aria-modal="true" aria-labelledby="categoryModalTitle"><div class="modal-header"><h2 id="categoryModalTitle">${editing?'แก้ไข':'เพิ่ม'}หมวดย่อย</h2><button class="modal-close" id="closeCategoryXBtn" type="button" aria-label="ปิด">×</button></div><div class="form-grid"><label>ประเภทสินค้า<input id="categoryKind" list="categoryKindList" value="${html(row.kind||'SEAL')}" ${editing?'readonly':''}><datalist id="categoryKindList"><option value="SEAL"><option value="ITEM"><option value="SERVICE"></datalist></label><label>รหัสหมวด<input id="categoryValue" value="${html(row.value||'')}" ${editing?'readonly':''} placeholder="เช่น NORMAL หรือ อุปกรณ์"></label><label>ชื่อที่แสดง<input id="categoryLabel" value="${html(row.label||'')}"></label><label>ลำดับ<input id="categorySort" type="number" min="0" value="${html(row.sortOrder||10)}"></label><label><input id="categoryEnabled" type="checkbox" ${row.enabled!==false?'checked':''}> เปิดแสดงหมวดนี้</label></div><div class="security-note">แก้ชื่อที่แสดงได้โดยไม่แก้ค่าหมวดในสินค้าเดิม รหัสหมวดจะล็อกหลังสร้าง</div><div class="chip-row modal-actions"><button class="btn success" id="saveCategoryBtn">บันทึกหมวดย่อย</button><button class="btn" id="closeCategoryBtn">ยกเลิก</button></div></div></div>`;
 }
 
+function themeSettingsPanel(settings){
+  const palette=themePalette(settings),theme=String(settings.themeDefault||'DARK').toUpperCase()==='LIGHT'?'LIGHT':'DARK';
+  return `<section class="panel theme-settings"><div class="admin-toolbar"><div><h2 class="panel-title">🎨 Theme เว็บไซต์</h2><p class="product-meta">ปรับสีหลักของหน้าร้านได้ทันที • ระบบจะตรวจรูปแบบสีและเลือกสีตัวอักษรบนปุ่มให้อ่านง่ายอัตโนมัติ</p></div><button class="btn" id="restoreThemeDefaultsBtn" type="button">คืนค่าเริ่มต้น</button></div><div class="theme-editor-grid"><div class="form-grid theme-fields"><label>โหมดเริ่มต้น<select id="setThemeDefault"><option value="DARK" ${theme==='DARK'?'selected':''}>มืด</option><option value="LIGHT" ${theme==='LIGHT'?'selected':''}>สว่าง</option></select></label><label>สีหลัก<input id="setThemePrimary" type="color" value="${html(palette.primary.toLowerCase())}"></label><label>สีรอง / Accent<input id="setThemeAccent" type="color" value="${html(palette.accent.toLowerCase())}"></label><label>สีพื้นหลัง<input id="setThemeBackground" type="color" value="${html(palette.background.toLowerCase())}"></label><label>สีปุ่ม<input id="setThemeButton" type="color" value="${html(palette.button.toLowerCase())}"></label><label>สีข้อความสำคัญ<input id="setThemeImportant" type="color" value="${html(palette.important.toLowerCase())}"></label></div><div class="theme-preview" id="themePreview"><span>ตัวอย่างหน้าร้าน</span><strong>สินค้าและยอดสุทธิ</strong><p>ข้อความทั่วไปยังคงอ่านง่าย</p><button class="btn primary" type="button" tabindex="-1">ปุ่มหลัก</button><button class="btn" type="button" tabindex="-1">ปุ่มทั่วไป</button><div class="theme-swatches"><i data-theme-swatch="primary"></i><i data-theme-swatch="accent"></i><i data-theme-swatch="background"></i><i data-theme-swatch="button"></i><i data-theme-swatch="important"></i></div></div></div><div class="security-note">หากค่าที่ส่งมาไม่ใช่สีแบบ #RRGGBB ระบบจะใช้ค่าสีเริ่มต้นแทนอย่างปลอดภัย</div></section>`;
+}
+
 function adminSettings(){
   const settings=state.adminData.settings||{},security=state.adminData.security||{},account=security.account||security.actor||{},owner=String(account.role||'')==='OWNER',environment=security.environment||'ไม่ทราบ';
   const checked=key=>settingEnabled(settings,key,true)?'checked':'';
   return `${adminSettingsBase()}
+  ${themeSettingsPanel(settings)}
   <section class="panel"><h2 class="panel-title">🏷️ ส่วนลดตามหมวดสินค้า</h2><p class="product-meta">คำนวณจากยอดรวมของแต่ละหมวด เงิน T นับรวมกับไอเทม • ใส่ 0 หรือเว้นว่าง = ไม่ลด</p><div class="form-grid"><label>ซีล (%)<input id="setCategoryDiscountSeal" type="number" min="0" max="100" step="0.01" value="${html(settings.categoryDiscountSealPercent||'')}" placeholder="0"></label><label>ไอเทม (%)<input id="setCategoryDiscountItem" type="number" min="0" max="100" step="0.01" value="${html(settings.categoryDiscountItemPercent||'')}" placeholder="0"></label><label>เซอร์วิส (%)<input id="setCategoryDiscountService" type="number" min="0" max="100" step="0.01" value="${html(settings.categoryDiscountServicePercent||'')}" placeholder="0"></label><div class="security-note full">ส่วนลดใหม่มีผลเฉพาะออเดอร์ที่สร้างหลังบันทึก ออเดอร์เก่าใช้ snapshot เดิม</div></div></section>
   <section class="panel"><h2 class="panel-title">📋 ข้อความคัดลอกรายการสั่งซื้อ</h2><p class="product-meta">Template ใช้จัดรูปแบบการแสดงผลเท่านั้น ราคาและส่วนลดอ่านจากระบบคำนวณจริงเสมอ</p><label class="full">Template<textarea id="setOrderCopyTemplate" class="template-editor">${html(configuredSettingText(settings,'orderCopyTemplate',DEFAULT_ORDER_COPY_TEMPLATE))}</textarea></label><div class="template-token-list">Token ที่ใช้ได้: <code>{title}</code> <code>{items}</code> <code>{pricing}</code> <code>{promotions}</code> <code>{customer}</code> <code>{notice}</code></div><div class="form-grid toggle-grid"><label><input id="setOrderCopyShowItems" type="checkbox" ${checked('orderCopyShowItems')}> รายการสินค้า</label><label><input id="setOrderCopyShowPricing" type="checkbox" ${checked('orderCopyShowPricing')}> สรุปราคา</label><label><input id="setOrderCopyShowCategoryDiscounts" type="checkbox" ${checked('orderCopyShowCategoryDiscounts')}> ส่วนลดตามหมวด</label><label><input id="setOrderCopyShowPromotions" type="checkbox" ${checked('orderCopyShowPromotions')}> โปรโมชั่นอื่น</label><label><input id="setOrderCopyShowD2" type="checkbox" ${checked('orderCopyShowD2')}> โปรโมชั่น D2</label><label><input id="setOrderCopyShowCustomer" type="checkbox" ${checked('orderCopyShowCustomer')}> ข้อมูลลูกค้า</label><label><input id="setOrderCopyShowNotice" type="checkbox" ${checked('orderCopyShowNotice')}> ข้อความท้ายออเดอร์</label></div><div class="security-note">ส่วนลด 0% จะไม่แสดงรายละเอียดส่วนลดโดยอัตโนมัติ</div></section>
   <section class="panel"><button class="btn success full" id="saveSettingsBtn">บันทึกการตั้งค่าทั้งหมด</button></section>
@@ -1503,6 +1522,12 @@ async function saveSettingsAction() {
     const settings = {
       shopName: document.getElementById('setShopName').value.trim(),
       ownerName: document.getElementById('setOwnerName').value.trim(),
+      themeDefault: document.getElementById('setThemeDefault').value==='LIGHT'?'LIGHT':'DARK',
+      themePrimaryColor: normalizeThemeColor(document.getElementById('setThemePrimary').value,DEFAULT_THEME_COLORS.primary),
+      themeAccentColor: normalizeThemeColor(document.getElementById('setThemeAccent').value,DEFAULT_THEME_COLORS.accent),
+      themeBackgroundColor: normalizeThemeColor(document.getElementById('setThemeBackground').value,DEFAULT_THEME_COLORS.background),
+      themeButtonColor: normalizeThemeColor(document.getElementById('setThemeButton').value,DEFAULT_THEME_COLORS.button),
+      themeImportantColor: normalizeThemeColor(document.getElementById('setThemeImportant').value,DEFAULT_THEME_COLORS.important),
       categoryDiscountSealPercent: discountPercent(document.getElementById('setCategoryDiscountSeal').value),
       categoryDiscountItemPercent: discountPercent(document.getElementById('setCategoryDiscountItem').value),
       categoryDiscountServicePercent: discountPercent(document.getElementById('setCategoryDiscountService').value),
@@ -1535,6 +1560,7 @@ async function saveSettingsAction() {
       apiKey: document.getElementById('setApiKey').value,
     };
     await apiPost({ action: 'saveSettings', token: state.adminToken, settings });
+    state.theme=settings.themeDefault;localStorage.setItem('dmo_theme',state.theme);
     toast('บันทึกการตั้งค่าแล้ว');
     await loadAdmin(true);
     await loadData(false);
@@ -1689,7 +1715,7 @@ function bind() {
   const favoriteCart=document.getElementById('favoriteCartBtn');if(favoriteCart)favoriteCart.onclick=()=>{state.cart.forEach((item)=>{const p=allProducts().find((x)=>x.id===item.id&&x.kind===item.kind);if(p&&!isFavorite(p))state.favoriteKeys.push(productKey(p));});state.favoriteKeys=[...new Set(state.favoriteKeys)].slice(0,300);localStorage.setItem('dmo_favorites',JSON.stringify(state.favoriteKeys));toast('บันทึกรายการโปรดแล้ว');render();};
   const saveOrder = document.getElementById('saveOrderBtn'); if (saveOrder) saveOrder.onclick = async () => { if(state.orderSubmitting)return;try { const remaining=Math.ceil((state.orderCooldownUntil-Date.now())/1000);if(remaining>0)throw Error(`กรุณารอ ${remaining} วินาทีก่อนส่งออเดอร์ใหม่`);const customer = customerValues(); if(!customer.tamer.trim()) throw Error('กรุณากรอกชื่อเทมเมอร์'); if(!customer.contact.trim()) throw Error('กรุณากรอกชื่อ Facebook'); if(!state.cart.length) throw Error('ยังไม่มีสินค้าในรายการ');const fingerprint=JSON.stringify({customer,items:state.cart.map(x=>({id:x.id,kind:x.kind,quantity:x.quantity}))});if(state.pendingOrderFingerprint!==fingerprint){state.pendingOrderFingerprint=fingerprint;state.pendingOrderRequestId=(crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(16).slice(2)}`);}const website=document.getElementById('orderWebsite')?.value||'';state.orderSubmitting=true;render();const data = await apiPost({ action: 'createOrder', requestId:state.pendingOrderRequestId, customer, items: state.cart, website, startedAt:state.orderFormStartedAt }); if(!data.orderId) throw Error('ระบบยังไม่เปิดรับออเดอร์ กรุณาติดต่อร้าน'); saveRecentOrderSnapshot(data.orderId); state.orderSuccess={orderId:data.orderId,total:Number(data.total||0),discount:Number(data.discount||0)};const cooldown=Math.max(5,Math.min(120,Number(state.settings.orderSubmitCooldownSeconds)||30));state.orderCooldownUntil=Date.now()+cooldown*1000;localStorage.setItem('dmo_order_cooldown_until',String(state.orderCooldownUntil));state.orderFormStartedAt=Date.now();state.cart=[];state.pendingOrderRequestId='';state.pendingOrderFingerprint='';state.orderSubmitting=false;render();setTimeout(()=>{if(state.page==='shop')render();},cooldown*1000+100);window.scrollTo({top:0,behavior:'smooth'}); } catch (error) { state.orderSubmitting=false;render();toast(error.message); } };
   const adminEntry = document.getElementById('adminEntry'); if (adminEntry) adminEntry.onclick = () => { state.page = 'admin'; location.hash = 'admin'; if (state.adminToken) loadAdmin(false); else render(); };
-  const backShop = document.getElementById('backShopBtn'); if (backShop) backShop.onclick = () => { state.page = 'shop'; location.hash = ''; render(); };
+  const backShop = document.getElementById('backShopBtn'); if (backShop) backShop.onclick = () => { state.page = 'shop'; location.hash = ''; if(!state.publicLoadedAt)loadData(true);else render(); };
   const login = document.getElementById('loginBtn'); if (login) login.onclick = async () => { if(state.loginSubmitting)return;const adminId=document.getElementById('adminId').value,password=document.getElementById('adminPassword').value;state.loginSubmitting=true;render();try { const data = await apiPost({ action: 'login', adminId, password }); state.loginSubmitting=false;state.adminToken = data.token; state.adminUser=data.user||null;state.adminData=adminBootstrapData();state.adminLoadedAt=0;state.adminLoadedScopes=new Set(); state.lastAdminActivity=Date.now(); sessionStorage.setItem('dmo_admin_token', data.token); sessionStorage.setItem('dmo_admin_user',JSON.stringify(state.adminUser)); sessionStorage.setItem('dmo_admin_activity',String(state.lastAdminActivity));render();await loadAdmin(true); } catch (error) { state.loginSubmitting=false;render();toast(error.message); } };
   const logout = document.getElementById('logoutBtn'); if (logout) logout.onclick = async () => { try{await apiPost({action:'logout',token:state.adminToken});}catch(e){} state.adminToken = ''; state.adminData = null;state.adminLoadedScopes=new Set(); state.adminUser=null; sessionStorage.removeItem('dmo_admin_token');sessionStorage.removeItem('dmo_admin_user');sessionStorage.removeItem('dmo_admin_activity'); render(); };
   document.querySelectorAll('[data-admin-view]').forEach((button) => button.onclick = async () => {
@@ -1760,6 +1786,8 @@ function bind() {
   const reloadOrdersBtn=document.getElementById('reloadOrdersBtn');if(reloadOrdersBtn)reloadOrdersBtn.onclick=()=>loadAdmin();
   const closeOrderSuccessBtn=document.getElementById('closeOrderSuccessBtn');if(closeOrderSuccessBtn)closeOrderSuccessBtn.onclick=()=>{state.orderSuccess=null;render();};
   const copyOrderSuccessBtn=document.getElementById('copyOrderSuccessBtn');if(copyOrderSuccessBtn)copyOrderSuccessBtn.onclick=()=>copyText(state.orderSuccess?.orderId||'','คัดลอกเลขออเดอร์แล้ว กรุณาส่งให้ร้านทาง Facebook');
+  ['setThemeDefault','setThemePrimary','setThemeAccent','setThemeBackground','setThemeButton','setThemeImportant'].forEach(id=>{const control=document.getElementById(id);if(control){control.oninput=previewThemeFromForm;control.onchange=previewThemeFromForm;}});
+  const restoreThemeDefaultsBtn=document.getElementById('restoreThemeDefaultsBtn');if(restoreThemeDefaultsBtn)restoreThemeDefaultsBtn.onclick=()=>{const values={setThemeDefault:'DARK',setThemePrimary:DEFAULT_THEME_COLORS.primary,setThemeAccent:DEFAULT_THEME_COLORS.accent,setThemeBackground:DEFAULT_THEME_COLORS.background,setThemeButton:DEFAULT_THEME_COLORS.button,setThemeImportant:DEFAULT_THEME_COLORS.important};Object.entries(values).forEach(([id,value])=>{const control=document.getElementById(id);if(control)control.value=value;});previewThemeFromForm();toast('คืนค่าสีเริ่มต้นในแบบฟอร์มแล้ว กดบันทึกเพื่อใช้งานจริง');};
   const saveSettings = document.getElementById('saveSettingsBtn'); if (saveSettings) saveSettings.onclick = saveSettingsAction;
   const copyFacebookPostBtn=document.getElementById('copyFacebookPostBtn');if(copyFacebookPostBtn)copyFacebookPostBtn.onclick=()=>copyText(document.getElementById('facebookPostPreview')?.value||facebookPostText(),'คัดลอกข้อความโพสต์ Facebook แล้ว');
   document.querySelectorAll('[data-toggle-password]').forEach((button)=>button.onclick=()=>{const input=document.getElementById(button.dataset.togglePassword);if(!input)return;const show=input.type==='password';input.type=show?'text':'password';button.textContent=show?'ซ่อน':'แสดง';});
@@ -1842,6 +1870,6 @@ document.addEventListener('click',(event)=>{const button=event.target.closest('b
 if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));}
 applyTheme();
 
-window.addEventListener('hashchange', () => { state.page = location.hash === '#admin' ? 'admin' : 'shop'; if (state.page === 'admin' && state.adminToken) loadAdmin(false); else render(); });
-loadData(true).then(()=>{if(state.page==='admin'&&state.adminToken)loadAdmin(false);});
+window.addEventListener('hashchange', () => { state.page = location.hash === '#admin' ? 'admin' : 'shop'; if(state.page==='admin'){if(state.adminToken)loadAdmin(false);else render();}else if(!state.publicLoadedAt)loadData(true);else render(); });
+if(state.page==='admin'){state.loading=false;render();if(state.adminToken)loadAdmin(false);}else loadData(true);
 setInterval(() => { if (state.page !== 'admin') loadData(false); }, Number(cfg.refreshMs) || 60000);

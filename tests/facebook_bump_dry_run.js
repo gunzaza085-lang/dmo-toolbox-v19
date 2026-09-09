@@ -44,7 +44,7 @@ const job=(id,targetPostId,offset=0,url)=>({jobId:id,targetPostId,postName:`Post
 
 test('Pre-flight schema is additive and database version advances',()=>{
   ['FacebookBumpPosts','FacebookBumpQueue','FacebookBumpHistory','FacebookOwnedComments','FacebookBumpTelemetry'].forEach(name=>assert(main.includes(name),`missing ${name}`));
-  assert(main.includes("const DATABASE_VERSION='3.3.1'"),'database version is not 3.3.1');
+  assert(main.includes("const DATABASE_VERSION='3.3.2'"),'database version is not 3.3.2');
   ['runDurationHours','runStartedAt','runUntil'].forEach(header=>assert(main.includes(header),`duration schema missing ${header}`));
   assert(main.includes("facebookBumpPaused:'TRUE'")&&moduleSource.includes("value('facebookBumpPaused',true)"),'Facebook module is not safe-paused by default');
   ['stockLogs','orders','customers','seals'].forEach(key=>assert(main.includes(`${key}:`),`protected schema missing ${key}`));
@@ -276,7 +276,7 @@ test('Worker uses one persistent browser and can focus an existing window',()=>{
   assert(worker.includes("req.url === '/open')")&&worker.includes('openFacebookPage(FACEBOOK_HOME,{focus:true})')&&!worker.includes('openFacebookPage(body.url || FACEBOOK_HOME'),'local open endpoint can navigate the Facebook profile to an arbitrary origin');
   assert(frontend.includes("targetAddressSpace:'local'"),'Production fetch does not request local-network access');
   assert(worker.includes("Access-Control-Allow-Private-Network', 'true'"),'worker does not approve private-network preflight');
-  assert(index.includes('app.js?v=20260908-v20.2-longrun-ux-dynamic-1')&&serviceWorker.includes('app.js?v=20260908-v20.2-longrun-ux-dynamic-1'),'PWA cache does not include the combined long-run/UX/performance build');
+  assert(index.includes('app.js?v=20260909-v20.2-theme-performance-3')&&serviceWorker.includes('app.js?v=20260909-v20.2-theme-performance-3'),'PWA cache does not include the combined theme/performance build');
   assert(frontend.includes('id="fbPauseAllBtn" ${state.facebookBump.pending?\'disabled\':\'\'}')&&frontend.includes('id="fbResumeAllBtn" ${state.facebookBump.pending?\'disabled\':\'\'}'),'stale admin state can lock out pause/resume recovery');
   assert(frontend.includes('facebookPairViaLocalTab')&&frontend.includes("event.data?.type!=='DMO_FACEBOOK_PAIR_RESULT'"),'BackOffice local pair bridge is missing');
   assert(worker.includes("req.url === '/pair-browser'")&&worker.includes('pairBridgeResponse'),'worker local pair bridge is missing');
@@ -325,7 +325,9 @@ test('Worker crash recovery is bounded and stale real jobs fail closed',()=>{
   assert(moduleSource.includes('WORKER_LEASE_EXPIRED_NEEDS_REVIEW'),'stale real job can be retried blindly');
   assert(moduleSource.includes('facebookBumpRecoverStaleJobs(queue,posts,now)'),'stale real job recovery is not called');
   const claimSource=moduleSource.slice(moduleSource.indexOf('function claimFacebookBumpJob'),moduleSource.indexOf('function completeFacebookBumpJob'));
-  assert(claimSource.indexOf('facebookBumpRecoverStaleJobs(queue,posts,now)')<claimSource.indexOf("if(workerStatus.connection!=='CONNECTED')"),'stale jobs stay stuck while Facebook is disconnected or globally paused');
+  assert(moduleSource.includes('FACEBOOK_BUMP_IDLE_CLAIM_AUDIT_SECONDS=300')&&claimSource.includes('if(idleReason&&!facebookBumpIdleClaimAuditDue())'),'idle polling no longer bounds the stale-job safety audit');
+  assert(claimSource.indexOf('facebookBumpRecoverStaleJobs(queue,posts,now)')<claimSource.indexOf('if(idleReason){facebookBumpMarkIdleClaimAudit();return output'),'stale jobs stay stuck while Facebook is disconnected or globally paused');
+  assert(claimSource.indexOf('facebookBumpRecoverStaleJobs(queue,posts,now)')<claimSource.indexOf('facebookBumpMarkIdleClaimAudit()'),'a failed idle audit can suppress safe recovery retries');
   assert(moduleSource.includes("if(/NEEDS_REVIEW/.test(String(job.error||'')))"),'unsafe retry guard missing');
   assert(frontend.includes('recoverFacebookWorkerPair'),'BackOffice pair recovery missing');
   assert(facebookPage.includes('COMMENT_SUBMIT_TIMEOUT_NEEDS_REVIEW')&&facebookPage.includes('COMMENT_REFERENCE_UNVERIFIED_NEEDS_REVIEW'),'uncertain comments can be retried and duplicated');

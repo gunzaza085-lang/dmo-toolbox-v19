@@ -1,7 +1,7 @@
 {
   "name": "gun-shop-dmo-facebook-worker",
   "private": true,
-  "version": "20.2.1",
+  "version": "20.2.2",
   "scripts": {
     "facebook-worker": "node facebook-worker/worker.js",
     "test-server": "node facebook-worker/dev-server.js",
