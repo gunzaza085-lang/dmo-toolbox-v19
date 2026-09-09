@@ -82,6 +82,7 @@ test('worker heartbeat avoids redundant database work and timer collisions',()=>
   assert(gas.includes("if(body.action!=='reportFacebookWorkerStatus')ensureDatabase()"),'heartbeat still performs full database readiness work');
   assert(worker.includes('FACEBOOK_WORKER_HEARTBEAT_MS || 60000')&&worker.includes('reportRemoteHeartbeat().catch(() => {}), 15000'),'worker heartbeat remains aligned with the 30-second poll');
   assert(facebookModule.includes('FACEBOOK_WORKER_HEARTBEAT_TTL_MS=90000'),'backend online safety window changed unexpectedly');
+  assert(facebookModule.includes('settingRows||existingRows(SHEETS.settings)'),'idle claim still repeats Settings schema validation every 30 seconds');
   assert(facebookModule.includes('FACEBOOK_BUMP_IDLE_CLAIM_AUDIT_SECONDS=300')&&facebookModule.includes("idleReason&&!facebookBumpIdleClaimAuditDue()"),'idle Worker claims still rescan Queue/Posts every 30 seconds');
   assert(worker.includes("WORKER_VERSION = '20.2.2-performance'"),'worker package version was not advanced for PC2 verification');
 });

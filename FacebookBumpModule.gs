@@ -88,7 +88,7 @@ function facebookBumpRecoverStaleJobs(queue,posts,now){const recovered=[];(queue
 function facebookBumpExpirePosts(posts,queue,now){const expired=[];(posts||[]).filter(post=>!post.deletedAt&&facebookBumpBoolean(post.enabled)&&facebookBumpExpired(post,now)).forEach(post=>{post.enabled='FALSE';post.nextRunAt='';post.lastStatus='AUTO_PAUSED_EXPIRED';post.updatedAt=now||new Date();facebookBumpWriteRow(SHEETS.facebookBumpPosts,post);facebookBumpCancelPending(queue,post.id,'POST_RUN_EXPIRED',now);facebookBumpAppendHistory({targetPostId:post.id,postName:post.name,postUrl:post.postUrl,action:'AUTO_PAUSE_EXPIRED',message:'',result:'COMPLETED',cleanupResult:'NOT_RUN',error:'',jobId:''});log('FACEBOOK_BUMP_AUTO_PAUSE','FACEBOOK_BUMP',post.id,post.name,facebookBumpIso(post.runUntil));expired.push(post.id);});return expired;}
 
 function facebookBumpSettings(settingRows){
-  const values={};(settingRows||rows(SHEETS.settings)).forEach(item=>{const key=String(item.key),raw=item.value;if(!Object.prototype.hasOwnProperty.call(values,key))values[key]=typeof raw==='boolean'?raw:smart(raw);});
+  const values={};(settingRows||existingRows(SHEETS.settings)).forEach(item=>{const key=String(item.key),raw=item.value;if(!Object.prototype.hasOwnProperty.call(values,key))values[key]=typeof raw==='boolean'?raw:smart(raw);});
   const value=(key,fallback)=>Object.prototype.hasOwnProperty.call(values,key)?values[key]:fallback;
   const mode=String(value('facebookBumpMode',value('facebookBumpDryRun',true)===false?'REAL':'DRY_RUN')).toUpperCase()==='REAL'?'REAL':'DRY_RUN';
   return{
