@@ -115,6 +115,9 @@ const state = {
   integrityReport: null,
   catalogVisible: 60,
   imageManager: { zipData: '', fileName: '', preview: null, applying: false, allowOverwrite: false },
+  recordImageUpload: null,
+  servicePosterUpload: null,
+  customerDetailData: { id: '', orders: [], interactions: [], loading: false, error: '', loadedAt: 0 },
   facebookBump: { tab: 'POSTS', edit: null, pending: '', loadingModule: false, loadError: '', loadStartedAt: 0, loadDurationMs: 0, connection: { worker: 'UNKNOWN', browser: 'STOPPED', connection: 'UNKNOWN', paired: false, running: false, lastError: '', account: {} } },
   publicLoadedAt: 0,
 };
@@ -244,9 +247,10 @@ function applyThemePalette(palette){const root=document.documentElement;root.sty
 function settingEnabled(settings,key,fallback=true){if(!hasOwn(settings,key))return fallback;return settings[key]!==false&&String(settings[key]).toUpperCase()!=='FALSE';}
 function productSubcategoryValue(product){if(product.kind==='SEAL')return String(product.section||'').trim();if(product.kind==='SERVICE')return String(product.serviceCategory||'').trim();if(product.kind==='ITEM')return String(product.itemCategory||'').trim();return'';}
 function productSubcategorySettings(settings=state.adminData?.settings||state.settings){
-  let configured=[];
-  try{const parsed=Array.isArray(settings?.productSubcategoriesJson)?settings.productSubcategoriesJson:JSON.parse(String(settings?.productSubcategoriesJson||'[]'));if(Array.isArray(parsed))configured=parsed;}catch(error){}
-  if(!configured.length)configured=DEFAULT_PRODUCT_SUBCATEGORIES;
+  const raw=settings?.productSubcategoriesJson;let configured=null;
+  if(Array.isArray(raw))configured=raw;
+  else if(raw!==undefined&&raw!==null&&String(raw).trim()!=='')try{const parsed=JSON.parse(String(raw));if(Array.isArray(parsed))configured=parsed;}catch(error){}
+  if(configured===null)configured=DEFAULT_PRODUCT_SUBCATEGORIES;
   const list=[],seen=new Set(),add=(item,index)=>{const kind=String(item?.kind||'').trim().toUpperCase(),value=String(item?.value||'').trim(),key=kind+'|'+value.toUpperCase();if(!kind||!value||seen.has(key))return;seen.add(key);list.push({id:String(item.id||key),kind,value,label:String(item.label||value),sortOrder:Number(item.sortOrder)||((index+1)*10),enabled:item.enabled!==false&&String(item.enabled).toUpperCase()!=='FALSE'});};
   configured.forEach(add);
   const admin=state.adminData,products=admin?[...(admin.seals||[]),...(admin.gameItems||[]),...(admin.services||[])]:allProducts();
@@ -258,7 +262,7 @@ function subcategoryLabel(kind,value){return productSubcategorySettings().find(i
 function subcategoryOptions(kind,current){const rows=subcategoriesFor(kind),hasCurrent=rows.some(row=>row.value===current);return `${!current?'<option value="" selected>ไม่ระบุ</option>':'<option value="">ไม่ระบุ</option>'}${!hasCurrent&&current?`<option value="${html(current)}" selected>${html(subcategoryLabel(kind,current))} (ปิดอยู่)</option>`:''}${rows.map(row=>`<option value="${html(row.value)}" ${row.value===current?'selected':''}>${html(row.label)}</option>`).join('')}`;}
 function renderPreservingScroll(){const windowX=window.scrollX,windowY=window.scrollY,productTop=document.querySelector('.products')?.scrollTop||0,cartTop=document.querySelector('.cart-list')?.scrollTop||0;render();requestAnimationFrame(()=>{window.scrollTo(windowX,windowY);const products=document.querySelector('.products'),cart=document.querySelector('.cart-list');if(products)products.scrollTop=productTop;if(cart)cart.scrollTop=cartTop;});}
 function bindModalDirty(backdropId,kind){const modal=document.getElementById(backdropId);if(!modal)return;modal.querySelectorAll('input,select,textarea').forEach(control=>{const mark=()=>{state.modalDirty[kind]=true;};control.addEventListener('input',mark);control.addEventListener('change',mark);});}
-function closeStateModal(kind){if(kind!=='wiki'&&state.modalDirty[kind]&&!confirm('มีข้อมูลที่แก้ไขแล้วยังไม่ได้บันทึก ต้องการปิดโดยไม่บันทึกหรือไม่?'))return false;if(kind==='record')state.editRecord=null;else if(kind==='promo')state.promoEdit=null;else if(kind==='category')state.categoryEdit=null;else if(kind==='wiki')state.wikiGallery=null;if(kind!=='wiki')state.modalDirty[kind]=false;render();return true;}
+function closeStateModal(kind){if(kind!=='wiki'&&state.modalDirty[kind]&&!confirm('มีข้อมูลที่แก้ไขแล้วยังไม่ได้บันทึก ต้องการปิดโดยไม่บันทึกหรือไม่?'))return false;if(kind==='record'){state.editRecord=null;state.recordImageUpload=null;}else if(kind==='promo')state.promoEdit=null;else if(kind==='category')state.categoryEdit=null;else if(kind==='wiki')state.wikiGallery=null;if(kind!=='wiki')state.modalDirty[kind]=false;render();return true;}
 const safeExternalUrl=(value)=>{try{const url=new URL(String(value||''));return ['https:','http:'].includes(url.protocol)?url.toString():'';}catch(error){return'';}};
 const isVisible = (p) => !['HIDDEN', 'INACTIVE'].includes(String(p.status || 'ACTIVE'));
 const availableStock = (p) => p.availableStock !== undefined ? p.availableStock : (p.stock === '' ? '' : Math.max(0, Number(p.stock || 0) - Number(p.reservedStock || 0)));
@@ -318,7 +322,7 @@ async function fetchApiJson(url, options = {}, timeoutMs = 45000) {
     let response;
     try { response = await fetch(url, { ...options, signal: controller.signal }); }
     catch (error) {
-      if (error?.name === 'AbortError') throw apiResponseError('ระบบหลังบ้านตอบช้าเกิน 45 วินาที กรุณาลองใหม่', false);
+      if (error?.name === 'AbortError') throw apiResponseError(`ระบบหลังบ้านตอบช้าเกิน ${Math.ceil(timeoutMs/1000)} วินาที กรุณาลองใหม่`, false);
       throw apiResponseError('เชื่อมต่อระบบหลังบ้านไม่สำเร็จ กรุณาตรวจอินเทอร์เน็ตแล้วลองใหม่', true);
     }
     const raw = await response.text();
@@ -354,16 +358,18 @@ async function apiPost(payload) {
   if(sourceButton&&!sourceButton.disabled){sourceButton.dataset.originalText=sourceButton.innerHTML;sourceButton.disabled=true;sourceButton.innerHTML='<span class="loading"></span> กำลังดำเนินการ…';}
   apiBusyCount += 1;document.body.dataset.busyMessage=busyMessages[payload.action]||'กำลังดำเนินการ กรุณารอสักครู่…';document.body.classList.add('api-busy');
   try {
+    const readOnly = payload.action === 'getAdminData' || payload.action === 'getFacebookBumpAdminData';
+    const readDeadline = readOnly ? Date.now() + 25000 : 0;
+    const requestTimeout = () => readOnly ? Math.max(1000, Math.min(22000, readDeadline - Date.now())) : payload.action === 'login' ? 25000 : 45000;
     const send = () => fetchApiJson(cfg.sheetsUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(payload),
-    });
+    }, requestTimeout());
     let data;
     try { data = await send(); }
     catch (error) {
-      const readOnly = payload.action === 'getAdminData' || payload.action === 'getFacebookBumpAdminData';
-      if (!readOnly || !error?.retryable) throw error;
+      if (!readOnly || !error?.retryable || readDeadline-Date.now()<1500) throw error;
       await new Promise((resolve) => setTimeout(resolve, 600));
       data = await send();
     }
@@ -421,7 +427,7 @@ function applyAdminRoleGuards(){
   if(state.page!=='admin'||!state.adminToken)return;
   const role=String(state.adminUser?.role||'VIEWER').toUpperCase();
   const disable=(selectors)=>document.querySelectorAll(selectors.join(',')).forEach((el)=>{el.disabled=true;el.setAttribute('aria-disabled','true');el.title='บัญชี '+role+' ไม่มีสิทธิ์แก้ไขส่วนนี้';});
-  const adminOnly=['[data-new]','[data-edit]','[data-delete]','#saveRecordBtn','#bulkApplyBtn','#bulkTrashBtn','[data-restore-trash]','[data-delete-trash]','#saveSettingsBtn','#savePromotionBtn','[data-edit-promotion]','[data-delete-promotion]','#newCategoryBtn','[data-edit-category]','#saveCategoryBtn','#wikiGalleryBtn','#wikiCenterRecordBtn','[data-wiki-import]','[data-attach-wiki]','#imageZipInput','#previewImageZipBtn','#applyImageZipBtn'];
+  const adminOnly=['[data-new]','[data-edit]','[data-delete]','#saveRecordBtn','#fImageFile','#removeRecordImageBtn','#servicePosterFile','#removeServicePosterBtn','#bulkApplyBtn','#bulkTrashBtn','[data-restore-trash]','[data-delete-trash]','#saveSettingsBtn','#savePromotionBtn','[data-edit-promotion]','[data-delete-promotion]','#newCategoryBtn','[data-edit-category]','[data-delete-category]','#saveCategoryBtn','#wikiGalleryBtn','#wikiCenterRecordBtn','[data-wiki-import]','[data-attach-wiki]','#imageZipInput','#previewImageZipBtn','#applyImageZipBtn'];
   const staffWrite=['[data-save-order]','[data-pick-item]','[data-save-customer]','#saveCrmCustomerBtn','#addInteractionBtn'];
   const stockAdminOnly=['[data-stock-adjust]','[data-stock-set]','#stockAddBtn','#syncStockBtn'];
   const ownerOnly=['#saveSecurityUserBtn','#toggleBackupTriggerBtn','[data-restore-backup]','[data-delete-backup]'];
@@ -715,6 +721,7 @@ function adminPage() {
 
 function adminContent() {
   if (state.adminView !== 'facebookBump' && !state.adminLoadedScopes.has(state.adminView)) {
+    if (state.adminView === 'dashboard') return dashboardPage();
     return `<section class="panel empty"><span class="loading"></span> ${state.adminLoading ? 'กำลังโหลดข้อมูลหลังร้าน...' : 'ยังโหลดข้อมูลเมนูนี้ไม่สำเร็จ'}${state.adminLoading ? '' : '<br><button class="btn primary" id="retryAdminScopeBtn">ลองโหลดอีกครั้ง</button>'}</section>`;
   }
   if (state.adminView === 'catalog') return adminCatalog();
@@ -1112,7 +1119,7 @@ async function attachWikiResult(button) {
     state.wikiLookup.target = null;
     state.wikiLookup.results = [];
     await loadAdmin();
-    await loadData(false);
+    state.publicLoadedAt=0;
     state.adminView = 'catalog';
     render();
   } catch (error) { toast(error.message); }
@@ -1247,11 +1254,19 @@ function integrityPage(){
 
 
 function customerOrders(customer) {
-  const key = norm(customer.contact || customer.tamer || '');
-  return (state.adminData.orders || []).filter((order) => key && [order.contact, order.tamer].some((v) => norm(v) === key));
+  return String(state.customerDetailData.id)===String(customer?.customerId)?(state.customerDetailData.orders||[]):[];
 }
 function customerInteractions(customerId) {
-  return (state.adminData.customerInteractions || []).filter((x) => String(x.customerId) === String(customerId));
+  return String(state.customerDetailData.id)===String(customerId)?(state.customerDetailData.interactions||[]):[];
+}
+async function loadCustomerDetail(customerId,force=false){
+  const id=String(customerId||'');if(!id)return;
+  state.customerDetailId=id;
+  if(!force&&state.customerDetailData.id===id&&state.customerDetailData.loadedAt&&Date.now()-state.customerDetailData.loadedAt<30000){render();return;}
+  state.customerDetailData={id,orders:[],interactions:[],loading:true,error:'',loadedAt:0};render();
+  try{const data=await apiPost({action:'getAdminData',token:state.adminToken,scope:'customerDetail',targetId:id}),detail=data.customerDetail||{};if(state.customerDetailId!==id)return;state.customerDetailData={id,orders:detail.orders||[],interactions:detail.interactions||[],loading:false,error:'',loadedAt:Date.now()};}
+  catch(error){if(state.customerDetailId===id)state.customerDetailData={id,orders:[],interactions:[],loading:false,error:error.message||'โหลดประวัติลูกค้าไม่สำเร็จ',loadedAt:0};toast(error.message);}
+  finally{if(state.customerDetailId===id)render();}
 }
 function adminCustomers() {
   const customers = state.adminData.customers || [];
@@ -1293,18 +1308,18 @@ async function saveCustomerAction(id){
 }
 async function saveCrmDetail(){
   const id=state.customerDetailId;if(!id)return;
-  try{await apiPost({action:'updateCustomer',token:state.adminToken,customerId:id,tamer:document.getElementById('crmTamer').value,server:document.getElementById('crmServer').value,contact:document.getElementById('crmContact').value,vipLevel:document.getElementById('crmVip').value,status:document.getElementById('crmStatus').value,preferredContact:document.getElementById('crmPreferred').value,followUpAt:document.getElementById('crmFollowUp').value,tags:document.getElementById('crmTags').value,note:document.getElementById('crmNote').value});toast('บันทึกข้อมูล CRM แล้ว');await loadAdmin();}catch(e){toast(e.message);}
+  try{await apiPost({action:'updateCustomer',token:state.adminToken,customerId:id,tamer:document.getElementById('crmTamer').value,server:document.getElementById('crmServer').value,contact:document.getElementById('crmContact').value,vipLevel:document.getElementById('crmVip').value,status:document.getElementById('crmStatus').value,preferredContact:document.getElementById('crmPreferred').value,followUpAt:document.getElementById('crmFollowUp').value,tags:document.getElementById('crmTags').value,note:document.getElementById('crmNote').value});toast('บันทึกข้อมูล CRM แล้ว');await loadAdmin(true,'customers');await loadCustomerDetail(id,true);}catch(e){toast(e.message);}
 }
 async function addCustomerInteraction(){
   const customer=(state.adminData.customers||[]).find((c)=>String(c.customerId)===String(state.customerDetailId));if(!customer)return;
-  try{await apiPost({action:'addCustomerInteraction',token:state.adminToken,customerId:customer.customerId,customerName:customer.tamer,type:document.getElementById('interactionType').value,channel:document.getElementById('interactionChannel').value,note:document.getElementById('interactionNote').value,nextFollowUpAt:document.getElementById('interactionNext').value});toast('เพิ่มบันทึกการติดต่อแล้ว');await loadAdmin();}catch(e){toast(e.message);}
+  try{await apiPost({action:'addCustomerInteraction',token:state.adminToken,customerId:customer.customerId,customerName:customer.tamer,type:document.getElementById('interactionType').value,channel:document.getElementById('interactionChannel').value,note:document.getElementById('interactionNote').value,nextFollowUpAt:document.getElementById('interactionNext').value});toast('เพิ่มบันทึกการติดต่อแล้ว');await loadAdmin(true,'customers');await loadCustomerDetail(customer.customerId,true);}catch(e){toast(e.message);}
 }
 
 async function savePromoAction(){
   try{
     const p=state.promoEdit||{};
     await apiPost({action:'upsertPromotion',token:state.adminToken,promotion:{promotionId:p.promotionId||'',name:document.getElementById('pName').value,type:document.getElementById('pType').value,value:Number(document.getElementById('pValue').value)||0,minSpend:Number(document.getElementById('pMinSpend').value)||0,buyQty:document.getElementById('pBuyQty').value,freeQty:document.getElementById('pFreeQty').value,rewardText:document.getElementById('pRewardText').value,startAt:document.getElementById('pStartAt').value,endAt:document.getElementById('pEndAt').value,status:document.getElementById('pStatus').value,priority:Number(document.getElementById('pPriority').value)||10,stackable:document.getElementById('pStackable').value,scope:document.getElementById('pScope').value,note:document.getElementById('pNote').value}});
-    state.promoEdit=null;state.modalDirty.promo=false; toast('บันทึกโปรโมชั่นแล้ว'); await loadAdmin(); await loadData(false);
+    state.promoEdit=null;state.modalDirty.promo=false; toast('บันทึกโปรโมชั่นแล้ว'); await loadAdmin(); state.publicLoadedAt=0;
   }catch(e){toast(e.message);}
 }
 
@@ -1334,20 +1349,21 @@ function adminSecurity() {
 
 function adminSettingsBase() {
   const settings=state.adminData.settings||{},identity=shopIdentity(settings);
+  const posterPreview=state.servicePosterUpload?.previewUrl||safeExternalUrl(settings.servicePosterUrl||'');
   return `<section class="panel"><h2 class="panel-title">⚙️ ตั้งค่าร้านและข้อความหน้าเว็บ</h2><div class="form-grid">
     <label>ชื่อร้าน<input id="setShopName" value="${html(identity.shopName)}" placeholder="เว้นว่างเพื่อไม่แสดงชื่อร้าน"></label><label>ชื่อเจ้าของร้าน<input id="setOwnerName" value="${html(identity.ownerName)}" placeholder="เว้นว่างเพื่อไม่แสดงชื่อเจ้าของ"></label>
     <label class="full">ข้อความแนะนำใต้ชื่อร้าน<input id="setWebsiteIntro" value="${html(configuredSettingText(settings,'websiteIntroText','เลือกสินค้า • ส่งออเดอร์เข้าหลังบ้าน • รอร้านตรวจสอบก่อนชำระเงิน'))}"></label>
     <label class="full">ประกาศหน้าเว็บ<textarea id="setWebsiteAnnouncement" placeholder="เว้นว่างเพื่อซ่อน">${html(settings.websiteAnnouncement||'')}</textarea></label><label class="full">ข้อความโปรโมชั่นหน้าเว็บ<textarea id="setWebsitePromotionText" placeholder="เว้นว่างเพื่อซ่อน">${html(settings.websitePromotionText||'')}</textarea></label><label class="full">ข้อความสำคัญหน้าเว็บ<textarea id="setWebsiteImportantNotice" placeholder="เว้นว่างเพื่อซ่อน">${html(settings.websiteImportantNotice||'')}</textarea></label>
     <label>ยอดครบโปร D2<input id="setThreshold" type="number" value="${html(settings.promoThreshold||100)}"></label><label>จำนวน D2 ต่อชุด<input id="setReward" type="number" value="${html(settings.promoReward||150)}"></label><label>รีเฟรชทุกกี่วินาที<input id="setRefresh" type="number" value="${html(settings.autoRefreshSeconds||60)}"></label><label>พักหลังส่งออเดอร์ (วินาที)<input id="setOrderCooldown" type="number" min="5" max="120" value="${html(settings.orderSubmitCooldownSeconds||30)}"></label>
     <label>ช่วงตรวจ Rate limit (วินาที)<input id="setOrderRateWindow" type="number" min="60" max="3600" value="${html(settings.orderRateWindowSeconds||300)}"></label><label>ออเดอร์สูงสุดต่อช่วง<input id="setOrderRateMax" type="number" min="1" max="10" value="${html(settings.orderRateMax||3)}"></label><label>Session (วัน)<input id="setSessionDays" type="number" min="1" max="30" value="${html(settings.sessionDays||7)}"></label><label>Auto Lock (นาที)<input id="setAutoLock" type="number" min="5" value="${html(settings.autoLockMinutes||30)}"></label>
-    <label>API Key<input id="setApiKey" type="password" value="${html(settings.apiKey||'')}" placeholder="ตั้งได้ตามต้องการ"></label><label>Facebook URL<input id="setFacebook" value="${html(settings.facebookUrl||'')}"></label><label>LINE URL<input id="setLine" value="${html(settings.lineUrl||'')}"></label><label class="full">โปสเตอร์หน้าบริการ (URL รูปจริง)<input id="setServicePoster" value="${html(settings.servicePosterUrl||'')}" placeholder="เว้นว่างเพื่อซ่อนโปสเตอร์อย่างสะอาด"></label>
+    <label>API Key<input id="setApiKey" type="password" value="${html(settings.apiKey||'')}" placeholder="ตั้งได้ตามต้องการ"></label><label>Facebook URL<input id="setFacebook" value="${html(settings.facebookUrl||'')}"></label><label>LINE URL<input id="setLine" value="${html(settings.lineUrl||'')}"></label><label class="full">โปสเตอร์หน้าบริการ (URL รูปจริง)<input id="setServicePoster" value="${html(settings.servicePosterUrl||'')}" placeholder="เว้นว่างเพื่อซ่อนโปสเตอร์อย่างสะอาด"></label><div class="full admin-image-editor"><div class="admin-image-preview ${posterPreview?'has-image':''}" id="servicePosterPreviewWrap">${posterPreview?`<img id="servicePosterPreview" src="${html(posterPreview)}" alt="ตัวอย่างโปสเตอร์บริการ">`:'<span id="servicePosterPreviewEmpty">ยังไม่มีโปสเตอร์</span>'}</div><div><label class="file-picker">เลือกรูปโปสเตอร์จากเครื่อง<input id="servicePosterFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif"></label><div class="chip-row"><button class="btn small" id="removeServicePosterBtn" type="button">นำโปสเตอร์ออก</button></div><small id="servicePosterStatus">รองรับ PNG, JPG, WEBP, GIF • ระบบจะย่อรูปใหญ่ให้อัตโนมัติ • ไม่ลบไฟล์เก่าใน Drive</small></div></div>
     <label class="full">ข้อความท้ายออเดอร์<textarea id="setNotice">${html(settings.orderNotice||'')}</textarea></label><label><input id="setAllowOrder" type="checkbox" ${settingEnabled(settings,'allowOrderSave',true)?'checked':''}> บันทึกออเดอร์ลงชีต</label><label><input id="setShowStock" type="checkbox" ${settingEnabled(settings,'showStock',true)?'checked':''}> แสดงสต๊อกแก่ลูกค้า</label>
   </div></section>`;
 }
 
 function productCategoriesPage(){
   const categories=productSubcategorySettings(),kindLabel=kind=>({SEAL:'ซีล',ITEM:'ไอเทม',SERVICE:'บริการ'}[kind]||kind);
-  return `<section class="panel"><div class="admin-toolbar"><div><h2 class="panel-title">🗂️ หมวดย่อยสินค้า</h2><p class="product-meta">เพิ่ม เปลี่ยนชื่อ เรียง และเปิด-ปิดหมวดได้โดยไม่แก้ Code • การปิดหมวดจะซ่อนปุ่มกรอง แต่ไม่ลบหรือเปลี่ยนข้อมูลสินค้าเดิม</p></div><button class="btn primary" id="newCategoryBtn">+ เพิ่มหมวดย่อย</button></div><div class="subcategory-groups">${[...new Set(categories.map(row=>row.kind))].map(kind=>`<div class="subcategory-group"><h3>${html(kindLabel(kind))}</h3>${categories.filter(row=>row.kind===kind).map(row=>`<div class="subcategory-row"><span class="badge ${row.enabled?'green':'amber'}">${row.enabled?'เปิด':'ปิด'}</span><div><b>${html(row.label)}</b><small>${html(row.value)} • ลำดับ ${money(row.sortOrder)}</small></div><button class="btn small" data-edit-category="${html(row.id)}">แก้ไข</button></div>`).join('')}</div>`).join('')||'<div class="empty">ยังไม่มีหมวดย่อย</div>'}</div></section>${state.categoryEdit!==null?categoryModal():''}`;
+  return `<section class="panel"><div class="admin-toolbar"><div><h2 class="panel-title">🗂️ หมวดย่อยสินค้า</h2><p class="product-meta">เพิ่ม เปลี่ยนชื่อ เรียง เปิด-ปิด และลบหมวดได้โดยไม่แก้ Code • ระบบจะไม่ยอมลบหมวดที่ยังมีสินค้าผูกอยู่</p></div><button class="btn primary" id="newCategoryBtn">+ เพิ่มหมวดย่อย</button></div><div class="subcategory-groups">${[...new Set(categories.map(row=>row.kind))].map(kind=>`<div class="subcategory-group"><h3>${html(kindLabel(kind))}</h3>${categories.filter(row=>row.kind===kind).map(row=>`<div class="subcategory-row"><span class="badge ${row.enabled?'green':'amber'}">${row.enabled?'เปิด':'ปิด'}</span><div><b>${html(row.label)}</b><small>${html(row.value)} • ลำดับ ${money(row.sortOrder)}</small></div><div class="subcategory-row-actions"><button class="btn small" data-edit-category="${html(row.id)}">แก้ไข</button><button class="btn danger small" data-delete-category="${html(row.id)}">ลบ</button></div></div>`).join('')}</div>`).join('')||'<div class="empty">ยังไม่มีหมวดย่อย</div>'}</div><div class="security-note">หากหมวดยังถูกใช้ ระบบจะแจ้งจำนวนสินค้าที่ต้องย้ายหรือเปลี่ยนเป็น “ไม่ระบุ” ก่อน โดยจะไม่แก้สินค้าให้อัตโนมัติ</div></section>${state.categoryEdit!==null?categoryModal():''}`;
 }
 
 function categoryModal(){
@@ -1381,7 +1397,8 @@ function editModal() {
   const seal = record.kind === 'SEAL';
   const service = record.kind === 'SERVICE';
   const tMoney=record.kind==='TMONEY';
-  return `<div class="modal-backdrop" id="modalBackdrop"><div class="modal"><h2>${record.id ? 'แก้ไข' : 'เพิ่ม'}${seal ? 'ซีล' : service ? 'บริการ' : tMoney ? 'เงิน T' : 'ไอเทม'}</h2><div class="form-grid"><label>ชื่อ<input id="fName" value="${html(record.name || '')}" ${tMoney?'readonly':''}></label><label>ชื่อค้นหาเพิ่มเติม<input id="fAliases" value="${html(Array.isArray(record.aliases) ? record.aliases.join('|') : record.aliases || '')}" placeholder="คั่นด้วย |"></label>${seal ? `<label>สาย<select id="fCategory">${['AT', 'HT', 'CT', 'HP', 'DS', 'DE', 'EV', 'BL'].map((category) => `<option ${record.category === category ? 'selected' : ''}>${category}</option>`).join('')}</select></label><label>ประเภท<select id="fSection">${['NORMAL', 'BASE_HARD', 'SUSA'].map((section) => `<option value="${section}" ${record.section === section ? 'selected' : ''}>${sectionLabel(section)}</option>`).join('')}</select></label><label>ชื่ออังกฤษ/คำค้น DMO Wiki<input id="fWikiName" value="${html(record.wikiName || '')}" placeholder="เช่น Agumon"></label><label>ชื่อหน้าที่เชื่อม<input id="fWikiTitle" value="${html(record.wikiTitle || '')}" placeholder="เชื่อมผ่าน DMO Wiki Center"></label><label class="full">URL DMO Wiki<input id="fWikiUrl" value="${html(record.wikiUrl || '')}"></label>` : service ? `<label>หมวดบริการ<input id="fServiceCategory" value="${html(record.serviceCategory || '')}" placeholder="เช่น ดันเจียน / เควสต์"></label>` : tMoney ? '<div class="security-note">สินค้าเงิน T มีได้หนึ่งรายการ ระบบใช้ Rate × จำนวน T และตรวจ Stock ฝั่ง Server</div>' : `<label>หมวดไอเทม<input id="fItemCategory" value="${html(record.itemCategory || '')}"></label>`}<label>${tMoney?'Rate (บาท/T)':'ราคา'}<input id="fPrice" type="number" step="0.01" min="0" value="${html(record.price || 0)}"></label><label>หน่วย<input id="fUnit" value="${html(record.unit || (service ? 'ครั้ง' : tMoney ? 'T' : 'ชิ้น'))}" ${tMoney?'readonly':''}></label>${seal ? `<label>จำนวนต่อชุด<input id="fPackSize" type="number" value="${html(record.packSize || 1000)}"></label>` : ''}<label>สถานะ<select id="fStatus">${['ACTIVE', 'CHECK_STOCK', 'OUT_OF_STOCK', 'INACTIVE', 'HIDDEN'].map((status) => `<option ${record.status === status ? 'selected' : ''}>${status}</option>`).join('')}</select></label><label>สต๊อกทั้งหมด (เว้นว่าง = ตรวจสอบ)<input id="fStock" type="number" value="${record.stock === '' ? '' : html(record.stock)}"></label><label>จำนวนที่กันไว้<input id="fReservedStock" type="number" min="0" value="${html(record.reservedStock || 0)}"></label><label>แจ้งเตือนใกล้หมด<input id="fLowStockAlert" type="number" min="0" value="${html(record.lowStockAlert || 0)}"></label><label>ต้นทุนต่อหน่วย<input id="fCostPrice" type="number" step="0.01" min="0" value="${html(record.costPrice || '')}"></label><label>ลำดับแสดง<input id="fSort" type="number" value="${html(record.sortOrder || 10)}"></label><label>ป้ายสินค้า<input id="fBadge" value="${html(record.badge || '')}" placeholder="HOT / NEW / SALE"></label><label>แท็กค้นหา<input id="fTags" value="${html(record.tags || '')}" placeholder="PVP|ขายดี|ดิจิมอน X"></label><label class="full">คำค้นเพิ่มเติม<input id="fSearchKeywords" value="${html(record.searchKeywords || '')}" placeholder="คำสะกดอื่นหรือคำที่ลูกค้ามักใช้"></label><label class="full">หมายเหตุ<input id="fNote" value="${html(record.note || '')}"></label>${seal ? '' : `<label class="full">รายละเอียด<textarea id="fDescription">${html(record.description || '')}</textarea></label>`}<label class="full">URL รูป<input id="fImageUrl" value="${html(record.imageUrl || '')}"></label><label class="full">อัปโหลดรูป<input id="fImageFile" type="file" accept="image/*"></label></div><div class="chip-row" style="margin-top:14px">${seal ? '<button class="btn warning" id="wikiGalleryBtn">🖼 เลือกรูป Seal Master</button><button class="btn primary" id="wikiCenterRecordBtn">📚 ค้นหน้าข้อมูล DMO Wiki</button>' : ''}<button class="btn success" id="saveRecordBtn">บันทึก</button><button class="btn" id="closeModalBtn">ยกเลิก</button></div></div></div>`;
+  const imagePreview=state.recordImageUpload?.previewUrl||safeExternalUrl(record.imageUrl||'');
+  return `<div class="modal-backdrop" id="modalBackdrop"><div class="modal"><h2>${record.id ? 'แก้ไข' : 'เพิ่ม'}${seal ? 'ซีล' : service ? 'บริการ' : tMoney ? 'เงิน T' : 'ไอเทม'}</h2><div class="form-grid"><label>ชื่อ<input id="fName" value="${html(record.name || '')}" ${tMoney?'readonly':''}></label><label>ชื่อค้นหาเพิ่มเติม<input id="fAliases" value="${html(Array.isArray(record.aliases) ? record.aliases.join('|') : record.aliases || '')}" placeholder="คั่นด้วย |"></label>${seal ? `<label>สาย<select id="fCategory">${['AT', 'HT', 'CT', 'HP', 'DS', 'DE', 'EV', 'BL'].map((category) => `<option ${record.category === category ? 'selected' : ''}>${category}</option>`).join('')}</select></label><label>ประเภท<select id="fSection">${['NORMAL', 'BASE_HARD', 'SUSA'].map((section) => `<option value="${section}" ${record.section === section ? 'selected' : ''}>${sectionLabel(section)}</option>`).join('')}</select></label><label>ชื่ออังกฤษ/คำค้น DMO Wiki<input id="fWikiName" value="${html(record.wikiName || '')}" placeholder="เช่น Agumon"></label><label>ชื่อหน้าที่เชื่อม<input id="fWikiTitle" value="${html(record.wikiTitle || '')}" placeholder="เชื่อมผ่าน DMO Wiki Center"></label><label class="full">URL DMO Wiki<input id="fWikiUrl" value="${html(record.wikiUrl || '')}"></label>` : service ? `<label>หมวดบริการ<input id="fServiceCategory" value="${html(record.serviceCategory || '')}" placeholder="เช่น ดันเจียน / เควสต์"></label>` : tMoney ? '<div class="security-note">สินค้าเงิน T มีได้หนึ่งรายการ ระบบใช้ Rate × จำนวน T และตรวจ Stock ฝั่ง Server</div>' : `<label>หมวดไอเทม<input id="fItemCategory" value="${html(record.itemCategory || '')}"></label>`}<label>${tMoney?'Rate (บาท/T)':'ราคา'}<input id="fPrice" type="number" step="0.01" min="0" value="${html(record.price || 0)}"></label><label>หน่วย<input id="fUnit" value="${html(record.unit || (service ? 'ครั้ง' : tMoney ? 'T' : 'ชิ้น'))}" ${tMoney?'readonly':''}></label>${seal ? `<label>จำนวนต่อชุด<input id="fPackSize" type="number" value="${html(record.packSize || 1000)}"></label>` : ''}<label>สถานะ<select id="fStatus">${['ACTIVE', 'CHECK_STOCK', 'OUT_OF_STOCK', 'INACTIVE', 'HIDDEN'].map((status) => `<option ${record.status === status ? 'selected' : ''}>${status}</option>`).join('')}</select></label><label>สต๊อกทั้งหมด (เว้นว่าง = ตรวจสอบ)<input id="fStock" type="number" value="${record.stock === '' ? '' : html(record.stock)}"></label><label>จำนวนที่กันไว้<input id="fReservedStock" type="number" min="0" value="${html(record.reservedStock || 0)}"></label><label>แจ้งเตือนใกล้หมด<input id="fLowStockAlert" type="number" min="0" value="${html(record.lowStockAlert || 0)}"></label><label>ต้นทุนต่อหน่วย<input id="fCostPrice" type="number" step="0.01" min="0" value="${html(record.costPrice || '')}"></label><label>ลำดับแสดง<input id="fSort" type="number" value="${html(record.sortOrder || 10)}"></label><label>ป้ายสินค้า<input id="fBadge" value="${html(record.badge || '')}" placeholder="HOT / NEW / SALE"></label><label>แท็กค้นหา<input id="fTags" value="${html(record.tags || '')}" placeholder="PVP|ขายดี|ดิจิมอน X"></label><label class="full">คำค้นเพิ่มเติม<input id="fSearchKeywords" value="${html(record.searchKeywords || '')}" placeholder="คำสะกดอื่นหรือคำที่ลูกค้ามักใช้"></label><label class="full">หมายเหตุ<input id="fNote" value="${html(record.note || '')}"></label>${seal ? '' : `<label class="full">รายละเอียด<textarea id="fDescription">${html(record.description || '')}</textarea></label>`}<label class="full">URL รูป<input id="fImageUrl" value="${html(record.imageUrl || '')}" placeholder="วาง URL เดิมได้ตามปกติ"></label><div class="full admin-image-editor"><div class="admin-image-preview ${imagePreview?'has-image':''}" id="recordImagePreviewWrap">${imagePreview?`<img id="recordImagePreview" src="${html(imagePreview)}" alt="ตัวอย่างรูปสินค้า">`:'<span id="recordImagePreviewEmpty">ยังไม่มีรูปสินค้า</span>'}</div><div><label class="file-picker">เลือก/เปลี่ยนรูปจากเครื่อง<input id="fImageFile" type="file" accept="image/png,image/jpeg,image/webp,image/gif"></label><div class="chip-row"><button class="btn small" id="removeRecordImageBtn" type="button">นำรูปออก</button></div><small id="recordImageStatus">รองรับ PNG, JPG, WEBP, GIF • ระบบจะย่อรูปใหญ่ให้อัตโนมัติ</small></div></div></div><div class="chip-row" style="margin-top:14px">${seal ? '<button class="btn warning" id="wikiGalleryBtn">🖼 เลือกรูป Seal Master</button><button class="btn primary" id="wikiCenterRecordBtn">📚 ค้นหน้าข้อมูล DMO Wiki</button>' : ''}<button class="btn success" id="saveRecordBtn">บันทึก</button><button class="btn" id="closeModalBtn">ยกเลิก</button></div></div></div>`;
 }
 
 function wikiGalleryModal() {
@@ -1396,7 +1413,7 @@ function standardWikiModalMarkup(){return wikiGalleryModal().replace('<div class
 function dynamicEditModalMarkup(){
   const record=state.editRecord||{kind:'SEAL',section:'NORMAL'};
   let markup=editModal();
-  if(record.kind==='SEAL')markup=markup.replace(/<select id="fSection">[\s\S]*?<\/select>/,`<select id="fSection">${subcategoryOptions('SEAL',record.section||'NORMAL')}</select>`);
+  if(record.kind==='SEAL')markup=markup.replace(/<select id="fSection">[\s\S]*?<\/select>/,`<select id="fSection">${subcategoryOptions('SEAL',record.section||'')}</select>`);
   if(record.kind==='ITEM')markup=markup.replace(/<input id="fItemCategory"[^>]*>/,`<select id="fItemCategory">${subcategoryOptions('ITEM',record.itemCategory||'')}</select>`);
   if(record.kind==='SERVICE')markup=markup.replace(/<input id="fServiceCategory"[^>]*>/,`<select id="fServiceCategory">${subcategoryOptions('SERVICE',record.serviceCategory||'')}</select>`);
   return standardModalMarkup(markup,'recordModalTitle','closeModalXBtn');
@@ -1409,7 +1426,7 @@ function adminBootstrapData() {
 async function loadAdmin(force = true, scope = state.adminView || 'dashboard') {
   scope=String(scope||'dashboard');
   if(state.adminLoading){await adminLoadPromise;if(!state.adminLoadedScopes.has(scope))return loadAdmin(force,scope);return;}
-  if(force)state.adminLoadedScopes=new Set();
+  if(force)state.adminLoadedScopes.delete(scope);
   if (!force && state.adminData && state.adminLoadedScopes.has(scope) && state.adminLoadedAt && Date.now() - state.adminLoadedAt < 30000) { render(); return; }
   state.adminLoading = true;
   if (!state.adminData) state.adminData = adminBootstrapData();
@@ -1463,10 +1480,11 @@ async function saveRecordAction() {
     const service = old.kind === 'SERVICE';
     const tMoney = old.kind === 'TMONEY';
     let imageUrl = document.getElementById('fImageUrl').value.trim();
-    const file = document.getElementById('fImageFile').files[0];
-    if (file) {
+    if (state.recordImageUpload) {
       toast('กำลังอัปโหลดรูป...');
-      imageUrl = await uploadFile(file);
+      imageUrl = await uploadPreparedImage(state.recordImageUpload);
+      document.getElementById('fImageUrl').value=imageUrl;
+      state.recordImageUpload=null;
     }
     const record = {
       ...old,
@@ -1500,29 +1518,46 @@ async function saveRecordAction() {
       else record.itemCategory = document.getElementById('fItemCategory').value.trim();
     }
     await apiPost({ action: 'upsert', token: state.adminToken, record });
-    state.editRecord = null;state.modalDirty.record=false;
+    state.editRecord = null;state.recordImageUpload=null;state.modalDirty.record=false;
     toast('บันทึกสินค้าแล้ว');
     await loadAdmin();
-    await loadData(false);
+    state.publicLoadedAt=0;
   } catch (error) {
     toast(error.message);
   }
 }
 
-function uploadFile(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = async () => {
-      try {
-        const base64 = String(reader.result).split(',')[1];
-        const data = await apiPost({ action: 'uploadImage', token: state.adminToken, data: base64, mimeType: file.type, fileName: file.name });
-        resolve(data.imageUrl);
-      } catch (error) { reject(error); }
-    };
-    reader.onerror = () => reject(Error('อ่านไฟล์รูปไม่สำเร็จ'));
-    reader.readAsDataURL(file);
-  });
+const ADMIN_IMAGE_MIME_BY_EXTENSION={jpg:'image/jpeg',jpeg:'image/jpeg',png:'image/png',webp:'image/webp',gif:'image/gif'};
+const ADMIN_IMAGE_ALLOWED_MIME=new Set(Object.values(ADMIN_IMAGE_MIME_BY_EXTENSION));
+const ADMIN_IMAGE_MAX_SOURCE_BYTES=10*1024*1024;
+const ADMIN_IMAGE_MAX_UPLOAD_BYTES=1950000;
+function fileDataUrl(file,errorMessage='อ่านไฟล์รูปไม่สำเร็จ'){return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result||''));reader.onerror=()=>reject(Error(errorMessage));reader.readAsDataURL(file);});}
+function imageFromUrl(url){return new Promise((resolve,reject)=>{const image=new Image();image.onload=()=>resolve(image);image.onerror=()=>reject(Error('เปิดไฟล์รูปไม่สำเร็จ กรุณาเลือก PNG, JPG, WEBP หรือ GIF ที่สมบูรณ์'));image.src=url;});}
+function canvasImageBlob(canvas,type,quality){return new Promise((resolve)=>canvas.toBlob(resolve,type,quality));}
+function imageFileMime(file){const declared=String(file?.type||'').toLowerCase(),extension=String(file?.name||'').split('.').pop().toLowerCase();return ADMIN_IMAGE_ALLOWED_MIME.has(declared)?declared:(ADMIN_IMAGE_MIME_BY_EXTENSION[extension]||'');}
+function imageUploadName(name,mime){const base=String(name||'product-image').replace(/\.[^.]+$/,'').replace(/[^a-zA-Z0-9ก-๙._-]+/g,'-').slice(0,90)||'product-image',extension=mime==='image/jpeg'?'jpg':mime.split('/')[1];return `${base}.${extension}`;}
+async function prepareAdminImage(file){
+  if(!file)throw Error('กรุณาเลือกไฟล์รูป');
+  const mime=imageFileMime(file);
+  if(!ADMIN_IMAGE_ALLOWED_MIME.has(mime))throw Error('รองรับเฉพาะรูป PNG, JPG, WEBP และ GIF เท่านั้น');
+  if(Number(file.size||0)>ADMIN_IMAGE_MAX_SOURCE_BYTES)throw Error('ไฟล์ต้นฉบับใหญ่เกิน 10 MB กรุณาลดขนาดก่อนอัปโหลด');
+  const originalUrl=await fileDataUrl(file);
+  if(Number(file.size||0)<=ADMIN_IMAGE_MAX_UPLOAD_BYTES)return{data:originalUrl.split(',')[1]||'',mimeType:mime,fileName:imageUploadName(file.name,mime),previewUrl:originalUrl,size:Number(file.size||0),compressed:false};
+  if(mime==='image/gif')throw Error('GIF ต้องมีขนาดไม่เกินประมาณ 1.9 MB เพราะระบบไม่ย่อภาพเคลื่อนไหว');
+  const image=await imageFromUrl(originalUrl),canvas=document.createElement('canvas'),maxDimension=1600,initialScale=Math.min(1,maxDimension/Math.max(image.naturalWidth||image.width,image.naturalHeight||image.height));
+  let width=Math.max(1,Math.round((image.naturalWidth||image.width)*initialScale)),height=Math.max(1,Math.round((image.naturalHeight||image.height)*initialScale)),blob=null,quality=.86;
+  for(let attempt=0;attempt<8;attempt++){
+    canvas.width=width;canvas.height=height;const context=canvas.getContext('2d');context.clearRect(0,0,width,height);context.drawImage(image,0,0,width,height);
+    blob=await canvasImageBlob(canvas,'image/webp',quality);
+    if(blob&&blob.size<=ADMIN_IMAGE_MAX_UPLOAD_BYTES)break;
+    if(quality>.58)quality-=.09;else{width=Math.max(1,Math.round(width*.8));height=Math.max(1,Math.round(height*.8));}
+  }
+  if(!blob||blob.size>ADMIN_IMAGE_MAX_UPLOAD_BYTES)throw Error('ย่อรูปแล้วยังใหญ่เกินไป กรุณาใช้รูปขนาดเล็กลง');
+  const previewUrl=await fileDataUrl(blob);
+  return{data:previewUrl.split(',')[1]||'',mimeType:'image/webp',fileName:imageUploadName(file.name,'image/webp'),previewUrl,size:blob.size,compressed:true};
 }
+async function uploadPreparedImage(prepared){if(!prepared?.data)throw Error('ข้อมูลรูปไม่พร้อมอัปโหลด');const result=await apiPost({action:'uploadImage',token:state.adminToken,data:prepared.data,mimeType:prepared.mimeType,fileName:prepared.fileName});return result.imageUrl;}
+function updateAdminImagePreview(prefix,prepared,urlValue){const wrap=document.getElementById(prefix+'PreviewWrap'),status=document.getElementById(prefix+'Status');if(!wrap)return;const preview=prepared?.previewUrl||safeExternalUrl(urlValue||'');wrap.classList.toggle('has-image',!!preview);wrap.innerHTML=preview?`<img id="${prefix}Preview" src="${html(preview)}" alt="ตัวอย่างรูป">`:`<span id="${prefix}PreviewEmpty">ยังไม่มีรูป</span>`;if(status&&prepared)status.textContent=`พร้อมอัปโหลด ${(prepared.size/1024).toFixed(0)} KB${prepared.compressed?' • ย่อเป็น WEBP แล้ว':''}`;}
 
 function fileAsBase64(file,errorMessage='อ่านไฟล์ไม่สำเร็จ'){
   return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]||'');reader.onerror=()=>reject(Error(errorMessage));reader.readAsDataURL(file);});
@@ -1597,6 +1632,12 @@ async function restoreOrderFromAdmin(id){if(state.adminActionPending)return;if(!
 
 async function saveSettingsAction() {
   try {
+    if(state.servicePosterUpload){
+      toast('กำลังอัปโหลดโปสเตอร์บริการ...');
+      const posterUrl=await uploadPreparedImage(state.servicePosterUpload),posterInput=document.getElementById('setServicePoster');
+      if(posterInput)posterInput.value=posterUrl;
+      state.servicePosterUpload=null;
+    }
     const settings = {
       shopName: document.getElementById('setShopName').value.trim(),
       ownerName: document.getElementById('setOwnerName').value.trim(),
@@ -1639,9 +1680,9 @@ async function saveSettingsAction() {
     };
     await apiPost({ action: 'saveSettings', token: state.adminToken, settings });
     state.theme=settings.themeDefault;localStorage.setItem('dmo_theme',state.theme);
-    toast('บันทึกการตั้งค่าแล้ว');
+    state.servicePosterUpload=null;toast('บันทึกการตั้งค่าแล้ว');
     await loadAdmin(true);
-    await loadData(false);
+    state.publicLoadedAt=0;
   } catch (error) { toast(error.message); }
 }
 
@@ -1652,7 +1693,19 @@ async function saveProductCategoryAction(){
     const categories=productSubcategorySettings(),duplicate=categories.find(row=>row.id!==current.id&&row.kind===kind&&row.value.toUpperCase()===value.toUpperCase());if(duplicate)throw Error('มีรหัสหมวดนี้อยู่แล้ว');
     const row={id:current.id||`CATEGORY-${kind}-${crypto.randomUUID?crypto.randomUUID():Date.now()}`,kind,value,label,sortOrder:Math.max(0,Number(document.getElementById('categorySort')?.value)||10),enabled:!!document.getElementById('categoryEnabled')?.checked},next=current.id?categories.map(item=>item.id===current.id?row:item):categories.concat(row);
     await apiPost({action:'saveSettings',token:state.adminToken,settings:{productSubcategoriesJson:JSON.stringify(next)}});
-    state.categoryEdit=null;state.modalDirty.category=false;toast('บันทึกหมวดย่อยแล้ว');await loadAdmin(true,'categories');await loadData(false);
+    state.categoryEdit=null;state.modalDirty.category=false;toast('บันทึกหมวดย่อยแล้ว');await loadAdmin(true,'categories');state.publicLoadedAt=0;
+  }catch(error){toast(error.message);}
+}
+
+async function deleteProductCategoryAction(categoryId){
+  const row=productSubcategorySettings().find(item=>String(item.id)===String(categoryId));
+  if(!row)return toast('ไม่พบหมวดย่อย กรุณาโหลดหน้าใหม่');
+  if(!confirm(`ยืนยันลบหมวดย่อย “${row.label}” ?\n\nหากยังมีสินค้าผูกอยู่ ระบบจะหยุดและไม่เปลี่ยนข้อมูลสินค้า`))return;
+  try{
+    const result=await apiPost({action:'deleteProductSubcategory',token:state.adminToken,categoryId:row.id,kind:row.kind,value:row.value});
+    state.categoryEdit=null;state.modalDirty.category=false;
+    toast(`ลบหมวดย่อยแล้ว${result.label?`: ${result.label}`:''}`);
+    await loadAdmin(true,'categories');state.publicLoadedAt=0;
   }catch(error){toast(error.message);}
 }
 
@@ -1670,7 +1723,7 @@ async function adjustStockAction(kind, id, delta) {
     state.stockActionPending=fingerprint;state.stockActionResult={message:'กำลังอัปเดต Stock กรุณารอสักครู่...',detail:product.name};render();
     const data=await apiPost({ action: 'adjustStock', token: state.adminToken, kind, id, delta, reason:String(reason).trim(),requestId });
     delete state.stockPendingRequests[fingerprint];state.stockActionResult={message:data.duplicate?'คำขอนี้สำเร็จแล้ว ระบบไม่เพิ่มซ้ำ':'เพิ่ม Stock สำเร็จ',detail:`${data.productName}: ${money(data.beforeStock)} → ${Number(data.changeAmount)>0?'+':''}${money(data.changeAmount)} → ${money(data.stock)} • ${new Date(data.updatedAt).toLocaleString('th-TH')}`};
-    toast(state.stockActionResult.message);await loadAdmin(true);await loadData(false);
+    toast(state.stockActionResult.message);await loadAdmin(true);state.publicLoadedAt=0;
   } catch (error) { state.stockActionResult={message:'ไม่สามารถอัปเดต Stock ได้ กรุณาลองใหม่',detail:error.message};toast(error.message); }
   finally{state.stockActionPending='';render();}
 }
@@ -1698,8 +1751,7 @@ async function setStockAction(kind, id) {
     });
     delete state.stockPendingRequests[fingerprint];
     toast('บันทึกสต๊อกแล้ว');
-    state.stockActionResult={message:'บันทึก Stock สำเร็จ',detail:product.name};await loadAdmin(true);
-    await loadData(false);
+    state.stockActionResult={message:'บันทึก Stock สำเร็จ',detail:product.name};await loadAdmin(true);state.publicLoadedAt=0;
   } catch (error) {state.stockActionResult={message:'ไม่สามารถอัปเดต Stock ได้ กรุณาลองใหม่',detail:error.message};toast(error.message);}
   finally{state.stockActionPending='';render();}
 }
@@ -1710,7 +1762,7 @@ async function addStockFromForm(){
   const [kind,id]=selected.split('|'),list=kind==='SEAL'?state.adminData.seals:kind==='TMONEY'?[state.adminData.moneyT]:state.adminData.gameItems,product=list.find(x=>x&&String(x.id)===String(id));if(!product)return toast('ไม่พบสินค้า');
   const fingerprint=`ADD|${kind}|${id}|${amount}|${reason}`;if(state.stockConfirmFingerprint!==fingerprint){state.stockConfirmFingerprint=fingerprint;state.stockActionResult={message:`ยืนยันเพิ่ม ${product.name} ${money(amount)} ${product.unit||'ชิ้น'}?`,detail:'ตรวจสอบข้อมูล แล้วกด “ยืนยันเพิ่ม Stock” อีกครั้ง'};render();return;}
   const requestId=state.stockPendingRequests[fingerprint]||(state.stockPendingRequests[fingerprint]=crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  try{state.stockConfirmFingerprint='';state.stockActionPending='ADD_FORM';state.stockActionResult={message:'กำลังอัปเดต Stock กรุณารอสักครู่...',detail:product.name};render();const data=await apiPost({action:'adjustStock',token:state.adminToken,kind,id,delta:amount,reason,requestId});delete state.stockPendingRequests[fingerprint];state.stockAddDraft={product:'',amount:'',reason:'เติมของเข้า'};state.stockActionResult={message:data.duplicate?'คำขอนี้สำเร็จแล้ว ระบบไม่เพิ่มซ้ำ':'เพิ่ม Stock สำเร็จ',detail:`${data.productName}: เดิม ${money(data.beforeStock)} • เพิ่ม ${money(data.changeAmount)} • ใหม่ ${money(data.stock)} • ${new Date(data.updatedAt).toLocaleString('th-TH')}`};toast(state.stockActionResult.message);await loadAdmin(true);await loadData(false);}catch(error){state.stockActionResult={message:'ไม่สามารถอัปเดต Stock ได้ กรุณาลองใหม่',detail:error.message};toast(error.message);}finally{state.stockActionPending='';render();}
+  try{state.stockConfirmFingerprint='';state.stockActionPending='ADD_FORM';state.stockActionResult={message:'กำลังอัปเดต Stock กรุณารอสักครู่...',detail:product.name};render();const data=await apiPost({action:'adjustStock',token:state.adminToken,kind,id,delta:amount,reason,requestId});delete state.stockPendingRequests[fingerprint];state.stockAddDraft={product:'',amount:'',reason:'เติมของเข้า'};state.stockActionResult={message:data.duplicate?'คำขอนี้สำเร็จแล้ว ระบบไม่เพิ่มซ้ำ':'เพิ่ม Stock สำเร็จ',detail:`${data.productName}: เดิม ${money(data.beforeStock)} • เพิ่ม ${money(data.changeAmount)} • ใหม่ ${money(data.stock)} • ${new Date(data.updatedAt).toLocaleString('th-TH')}`};toast(state.stockActionResult.message);await loadAdmin(true);state.publicLoadedAt=0;}catch(error){state.stockActionResult={message:'ไม่สามารถอัปเดต Stock ได้ กรุณาลองใหม่',detail:error.message};toast(error.message);}finally{state.stockActionPending='';render();}
 }
 
 function addToCartSilent(product, quantity) {
@@ -1821,9 +1873,9 @@ function bind() {
   const fbDisconnectWorkerBtn=document.getElementById('fbDisconnectWorkerBtn');if(fbDisconnectWorkerBtn)fbDisconnectWorkerBtn.onclick=()=>facebookWorkerAction('WORKER_DISCONNECT','/disconnect',{},'ตัดการเชื่อมต่อ Worker แล้ว');
   const fbSaveSettingsBtn=document.getElementById('fbSaveSettingsBtn');if(fbSaveSettingsBtn)fbSaveSettingsBtn.onclick=saveFacebookBumpSettingsFromForm;
   const runIntegrityBtn=document.getElementById('runIntegrityBtn');if(runIntegrityBtn)runIntegrityBtn.onclick=async()=>{try{runIntegrityBtn.disabled=true;runIntegrityBtn.textContent='กำลังตรวจ...';const data=await apiPost({action:'runIntegrityCheck',token:state.adminToken});state.integrityReport=data.integrity||null;render();}catch(e){toast(e.message);render();}};
-  document.querySelectorAll('[data-new]').forEach((button) => button.onclick = () => { const kind = button.dataset.new; state.editRecord = { kind, status: 'ACTIVE', category: 'AT', section: kind==='SEAL'?(subcategoriesFor('SEAL')[0]?.value||'NORMAL'):'', itemCategory:kind==='ITEM'?(subcategoriesFor('ITEM')[0]?.value||''):'', serviceCategory:kind==='SERVICE'?(subcategoriesFor('SERVICE')[0]?.value||''):'', unit: kind === 'SEAL' ? 'ชุด' : kind === 'SERVICE' ? 'ครั้ง' : 'ชิ้น', packSize: 1000, sortOrder: 10, stock: '', reservedStock: 0, lowStockAlert: 0, costPrice: '' };state.modalDirty.record=false; render(); });
-  document.querySelectorAll('[data-edit]').forEach((button) => button.onclick = () => { const [kind, id] = button.dataset.edit.split('|'); const list = kind === 'SEAL' ? state.adminData.seals : kind === 'SERVICE' ? state.adminData.services : kind === 'TMONEY' ? [state.adminData.moneyT] : state.adminData.gameItems; state.editRecord = { ...list.find((entry) => entry&&entry.id === id) };state.modalDirty.record=false; render(); });
-  document.querySelectorAll('[data-delete]').forEach((button) => button.onclick = async () => { const [kind, id] = button.dataset.delete.split('|'); if (!confirm('ย้ายรายการนี้ลงถังขยะ?')) return; try { await apiPost({ action: 'softDelete', token: state.adminToken, kind, id }); state.adminSelected=state.adminSelected.filter((x)=>x!==`${kind}|${id}`); toast('ย้ายลงถังขยะแล้ว'); await loadAdmin(); await loadData(false); } catch (error) { toast(error.message); } });
+  document.querySelectorAll('[data-new]').forEach((button) => button.onclick = () => { const kind = button.dataset.new; state.editRecord = { kind, status: 'ACTIVE', category: 'AT', section: kind==='SEAL'?(subcategoriesFor('SEAL')[0]?.value||''):'', itemCategory:kind==='ITEM'?(subcategoriesFor('ITEM')[0]?.value||''):'', serviceCategory:kind==='SERVICE'?(subcategoriesFor('SERVICE')[0]?.value||''):'', unit: kind === 'SEAL' ? 'ชุด' : kind === 'SERVICE' ? 'ครั้ง' : 'ชิ้น', packSize: 1000, sortOrder: 10, stock: '', reservedStock: 0, lowStockAlert: 0, costPrice: '' };state.recordImageUpload=null;state.modalDirty.record=false; render(); });
+  document.querySelectorAll('[data-edit]').forEach((button) => button.onclick = () => { const [kind, id] = button.dataset.edit.split('|'); const list = kind === 'SEAL' ? state.adminData.seals : kind === 'SERVICE' ? state.adminData.services : kind === 'TMONEY' ? [state.adminData.moneyT] : state.adminData.gameItems; state.editRecord = { ...list.find((entry) => entry&&entry.id === id) };state.recordImageUpload=null;state.modalDirty.record=false; render(); });
+  document.querySelectorAll('[data-delete]').forEach((button) => button.onclick = async () => { const [kind, id] = button.dataset.delete.split('|'); if (!confirm('ย้ายรายการนี้ลงถังขยะ?')) return; try { await apiPost({ action: 'softDelete', token: state.adminToken, kind, id }); state.adminSelected=state.adminSelected.filter((x)=>x!==`${kind}|${id}`); toast('ย้ายลงถังขยะแล้ว'); await loadAdmin(); state.publicLoadedAt=0; } catch (error) { toast(error.message); } });
   const adminSearch = document.getElementById('adminSearch'); if (adminSearch) adminSearch.oninput = (event) => document.querySelectorAll('[data-admin-name]').forEach((el) => { el.style.display = el.dataset.adminName.includes(norm(event.target.value)) ? '' : 'none'; });
   const adminCatalogSearch = document.getElementById('adminCatalogSearch'); if (adminCatalogSearch) adminCatalogSearch.oninput = (event) => { state.adminCatalogSearch = event.target.value;state.adminCatalogVisible=100; scheduleInputRender('adminCatalogSearch', 120); };
   const imageZipInput=document.getElementById('imageZipInput');if(imageZipInput)imageZipInput.onchange=()=>selectImageZip(imageZipInput.files&&imageZipInput.files[0]);
@@ -1835,14 +1887,17 @@ function bind() {
   const loadMoreAdminCatalogBtn=document.getElementById('loadMoreAdminCatalogBtn');if(loadMoreAdminCatalogBtn)loadMoreAdminCatalogBtn.onclick=()=>{state.adminCatalogVisible+=100;render();};
   document.querySelectorAll('[data-select-product]').forEach((box)=>box.onchange=()=>{const key=box.dataset.selectProduct;if(box.checked&&!state.adminSelected.includes(key))state.adminSelected.push(key);if(!box.checked)state.adminSelected=state.adminSelected.filter((x)=>x!==key);render();});
   const selectAllProducts=document.getElementById('selectAllProducts');if(selectAllProducts)selectAllProducts.onchange=()=>{const keys=[...document.querySelectorAll('[data-select-product]')].map((x)=>x.dataset.selectProduct);state.adminSelected=selectAllProducts.checked?keys:state.adminSelected.filter((x)=>!keys.includes(x));render();};
-  const bulkApply=document.getElementById('bulkApplyBtn');if(bulkApply)bulkApply.onclick=async()=>{const field=document.getElementById('bulkField').value,value=document.getElementById('bulkValue').value;if(!value)return toast('กรุณากรอกค่าที่ต้องการ');try{const records=state.adminSelected.map((x)=>{const [kind,id]=x.split('|');return{kind,id};});const changes={};changes[field]=['price','packSize','sortOrder','lowStockAlert'].includes(field)?Number(value):value;const data=await apiPost({action:'bulkUpdate',token:state.adminToken,records,changes});toast(`แก้ไข ${data.updated||0} รายการแล้ว`);state.adminSelected=[];await loadAdmin();await loadData(false);}catch(e){toast(e.message);}};
-  const bulkTrash=document.getElementById('bulkTrashBtn');if(bulkTrash)bulkTrash.onclick=async()=>{if(!confirm(`ย้าย ${state.adminSelected.length} รายการลงถังขยะ?`))return;try{for(const key of [...state.adminSelected]){const [kind,id]=key.split('|');await apiPost({action:'softDelete',token:state.adminToken,kind,id});}state.adminSelected=[];toast('ย้ายรายการลงถังขยะแล้ว');await loadAdmin();await loadData(false);}catch(e){toast(e.message);}};
-  document.querySelectorAll('[data-restore-trash]').forEach((button)=>button.onclick=async()=>{try{await apiPost({action:'restoreTrash',token:state.adminToken,trashId:button.dataset.restoreTrash});toast('กู้คืนแล้ว');await loadAdmin();await loadData(false);}catch(e){toast(e.message);}});
+  const bulkApply=document.getElementById('bulkApplyBtn');if(bulkApply)bulkApply.onclick=async()=>{const field=document.getElementById('bulkField').value,value=document.getElementById('bulkValue').value;if(!value)return toast('กรุณากรอกค่าที่ต้องการ');try{const records=state.adminSelected.map((x)=>{const [kind,id]=x.split('|');return{kind,id};});const changes={};changes[field]=['price','packSize','sortOrder','lowStockAlert'].includes(field)?Number(value):value;const data=await apiPost({action:'bulkUpdate',token:state.adminToken,records,changes});toast(`แก้ไข ${data.updated||0} รายการแล้ว`);state.adminSelected=[];await loadAdmin();state.publicLoadedAt=0;}catch(e){toast(e.message);}};
+  const bulkTrash=document.getElementById('bulkTrashBtn');if(bulkTrash)bulkTrash.onclick=async()=>{if(!confirm(`ย้าย ${state.adminSelected.length} รายการลงถังขยะ?`))return;try{for(const key of [...state.adminSelected]){const [kind,id]=key.split('|');await apiPost({action:'softDelete',token:state.adminToken,kind,id});}state.adminSelected=[];toast('ย้ายรายการลงถังขยะแล้ว');await loadAdmin();state.publicLoadedAt=0;}catch(e){toast(e.message);}};
+  document.querySelectorAll('[data-restore-trash]').forEach((button)=>button.onclick=async()=>{try{await apiPost({action:'restoreTrash',token:state.adminToken,trashId:button.dataset.restoreTrash});toast('กู้คืนแล้ว');await loadAdmin();state.publicLoadedAt=0;}catch(e){toast(e.message);}});
   document.querySelectorAll('[data-delete-trash]').forEach((button)=>button.onclick=async()=>{if(!confirm('ลบถาวรแล้วกู้คืนไม่ได้ ยืนยันหรือไม่?'))return;try{await apiPost({action:'permanentDelete',token:state.adminToken,trashId:button.dataset.deleteTrash});toast('ลบถาวรแล้ว');await loadAdmin();}catch(e){toast(e.message);}});
   const reloadAnalytics=document.getElementById('reloadAnalyticsBtn');if(reloadAnalytics)reloadAnalytics.onclick=()=>loadAdmin();
   const closeModal = document.getElementById('closeModalBtn'); if (closeModal) closeModal.onclick = () => closeStateModal('record');
   const closeModalX = document.getElementById('closeModalXBtn'); if (closeModalX) closeModalX.onclick = () => closeStateModal('record');
   bindModalDirty('modalBackdrop','record');
+  const recordImageInput=document.getElementById('fImageFile');if(recordImageInput)recordImageInput.onchange=async()=>{const file=recordImageInput.files&&recordImageInput.files[0],status=document.getElementById('recordImageStatus');if(!file)return;try{recordImageInput.disabled=true;if(status)status.textContent='กำลังตรวจและเตรียมรูป...';state.recordImageUpload=await prepareAdminImage(file);state.modalDirty.record=true;updateAdminImagePreview('recordImage',state.recordImageUpload,'');}catch(error){state.recordImageUpload=null;recordImageInput.value='';if(status)status.textContent=error.message;toast(error.message);}finally{recordImageInput.disabled=false;}};
+  const recordImageUrl=document.getElementById('fImageUrl');if(recordImageUrl)recordImageUrl.addEventListener('input',()=>{state.recordImageUpload=null;updateAdminImagePreview('recordImage',null,recordImageUrl.value);});
+  const removeRecordImageBtn=document.getElementById('removeRecordImageBtn');if(removeRecordImageBtn)removeRecordImageBtn.onclick=()=>{state.recordImageUpload=null;if(recordImageUrl)recordImageUrl.value='';if(recordImageInput)recordImageInput.value='';state.modalDirty.record=true;updateAdminImagePreview('recordImage',null,'');};
   const saveRecord = document.getElementById('saveRecordBtn'); if (saveRecord) saveRecord.onclick = saveRecordAction;
   const wikiButton = document.getElementById('wikiGalleryBtn'); if (wikiButton) wikiButton.onclick = () => state.modalDirty.record?toast('กรุณาบันทึกหรือยกเลิกการแก้ไขสินค้าก่อนเปิดคลังรูป'):openWikiGallery();
   const wikiCenterRecordBtn = document.getElementById('wikiCenterRecordBtn'); if (wikiCenterRecordBtn) wikiCenterRecordBtn.onclick = () => state.modalDirty.record?toast('กรุณาบันทึกหรือยกเลิกการแก้ไขสินค้าก่อนค้น DMO Wiki'):openWikiCenterForRecord(state.editRecord);
@@ -1867,6 +1922,9 @@ function bind() {
   ['setThemeDefault','setThemePrimary','setThemeAccent','setThemeBackground','setThemeButton','setThemeImportant'].forEach(id=>{const control=document.getElementById(id);if(control){control.oninput=previewThemeFromForm;control.onchange=previewThemeFromForm;}});
   const restoreThemeDefaultsBtn=document.getElementById('restoreThemeDefaultsBtn');if(restoreThemeDefaultsBtn)restoreThemeDefaultsBtn.onclick=()=>{const values={setThemeDefault:'DARK',setThemePrimary:DEFAULT_THEME_COLORS.primary,setThemeAccent:DEFAULT_THEME_COLORS.accent,setThemeBackground:DEFAULT_THEME_COLORS.background,setThemeButton:DEFAULT_THEME_COLORS.button,setThemeImportant:DEFAULT_THEME_COLORS.important};Object.entries(values).forEach(([id,value])=>{const control=document.getElementById(id);if(control)control.value=value;});previewThemeFromForm();toast('คืนค่าสีเริ่มต้นในแบบฟอร์มแล้ว กดบันทึกเพื่อใช้งานจริง');};
   const saveSettings = document.getElementById('saveSettingsBtn'); if (saveSettings) saveSettings.onclick = saveSettingsAction;
+  const servicePosterFile=document.getElementById('servicePosterFile');if(servicePosterFile)servicePosterFile.onchange=async()=>{const file=servicePosterFile.files&&servicePosterFile.files[0],status=document.getElementById('servicePosterStatus');if(!file)return;try{servicePosterFile.disabled=true;if(status)status.textContent='กำลังตรวจและเตรียมรูป...';state.servicePosterUpload=await prepareAdminImage(file);updateAdminImagePreview('servicePoster',state.servicePosterUpload,'');}catch(error){state.servicePosterUpload=null;servicePosterFile.value='';if(status)status.textContent=error.message;toast(error.message);}finally{servicePosterFile.disabled=false;}};
+  const servicePosterUrl=document.getElementById('setServicePoster');if(servicePosterUrl)servicePosterUrl.addEventListener('input',()=>{state.servicePosterUpload=null;updateAdminImagePreview('servicePoster',null,servicePosterUrl.value);});
+  const removeServicePosterBtn=document.getElementById('removeServicePosterBtn');if(removeServicePosterBtn)removeServicePosterBtn.onclick=()=>{state.servicePosterUpload=null;if(servicePosterUrl)servicePosterUrl.value='';if(servicePosterFile)servicePosterFile.value='';updateAdminImagePreview('servicePoster',null,'');};
   const copyFacebookPostBtn=document.getElementById('copyFacebookPostBtn');if(copyFacebookPostBtn)copyFacebookPostBtn.onclick=()=>copyText(document.getElementById('facebookPostPreview')?.value||facebookPostText(),'คัดลอกข้อความโพสต์ Facebook แล้ว');
   document.querySelectorAll('[data-toggle-password]').forEach((button)=>button.onclick=()=>{const input=document.getElementById(button.dataset.togglePassword);if(!input)return;const show=input.type==='password';input.type=show?'text':'password';button.textContent=show?'ซ่อน':'แสดง';});
   const changeOwnerPasswordBtn=document.getElementById('changeOwnerPasswordBtn');if(changeOwnerPasswordBtn)changeOwnerPasswordBtn.onclick=async()=>{if(state.adminActionPending)return;const currentPassword=document.getElementById('ownerCurrentPassword').value,newPassword=document.getElementById('ownerNewPassword').value,confirmPassword=document.getElementById('ownerConfirmPassword').value;if(newPassword.length<10)return toast('รหัสผ่านใหม่ต้องมีอย่างน้อย 10 ตัวอักษร');if(newPassword!==confirmPassword)return toast('รหัสผ่านใหม่และยืนยันรหัสผ่านไม่ตรงกัน');try{state.adminActionPending='OWNER_PASSWORD';changeOwnerPasswordBtn.disabled=true;changeOwnerPasswordBtn.textContent='กำลังเปลี่ยนรหัสผ่าน...';const data=await apiPost({action:'changeOwnerPassword',token:state.adminToken,currentPassword,newPassword,confirmPassword});state.adminToken='';state.adminData=null;state.adminUser=null;sessionStorage.removeItem('dmo_admin_token');sessionStorage.removeItem('dmo_admin_user');sessionStorage.removeItem('dmo_admin_activity');clearAdminShellCache();render();toast(data.message||'เปลี่ยนรหัสผ่านสำเร็จ กรุณาเข้าสู่ระบบอีกครั้ง');}catch(e){toast(e.message);}finally{state.adminActionPending='';}};
@@ -1880,7 +1938,7 @@ function bind() {
   if(stockAddProduct)stockAddProduct.onchange=()=>{state.stockAddDraft.product=stockAddProduct.value;state.stockConfirmFingerprint='';};
   if(stockAddAmount)stockAddAmount.oninput=()=>{state.stockAddDraft.amount=stockAddAmount.value;state.stockConfirmFingerprint='';};
   if(stockAddReason)stockAddReason.oninput=()=>{state.stockAddDraft.reason=stockAddReason.value;state.stockConfirmFingerprint='';};
-  const syncStockBtn=document.getElementById('syncStockBtn');if(syncStockBtn)syncStockBtn.onclick=async()=>{if(state.stockActionPending)return;try{state.stockActionPending='SYNC';state.stockActionResult={message:'กำลังซิงก์ Stock จาก Google Sheet...',detail:''};render();const data=await apiPost({action:'syncStock',token:state.adminToken});await loadAdmin(true);await loadData(false);state.stockActionResult={message:'ซิงก์ Stock สำเร็จ',detail:data.stockUpdatedAt?new Date(data.stockUpdatedAt).toLocaleString('th-TH'):''};toast('ซิงก์ Stock สำเร็จ');}catch(error){state.stockActionResult={message:'ซิงก์ Stock ไม่สำเร็จ',detail:error.message};toast(error.message);}finally{state.stockActionPending='';render();}};
+  const syncStockBtn=document.getElementById('syncStockBtn');if(syncStockBtn)syncStockBtn.onclick=async()=>{if(state.stockActionPending)return;try{state.stockActionPending='SYNC';state.stockActionResult={message:'กำลังซิงก์ Stock จาก Google Sheet...',detail:''};render();const data=await apiPost({action:'syncStock',token:state.adminToken});await loadAdmin(true);state.publicLoadedAt=0;state.stockActionResult={message:'ซิงก์ Stock สำเร็จ',detail:data.stockUpdatedAt?new Date(data.stockUpdatedAt).toLocaleString('th-TH'):''};toast('ซิงก์ Stock สำเร็จ');}catch(error){state.stockActionResult={message:'ซิงก์ Stock ไม่สำเร็จ',detail:error.message};toast(error.message);}finally{state.stockActionPending='';render();}};
   document.querySelectorAll('[data-stock-adjust]').forEach((button) => button.onclick = () => { const [kind, id, delta] = button.dataset.stockAdjust.split('|'); adjustStockAction(kind, id, Number(delta)); });
   document.querySelectorAll('[data-stock-set]').forEach((button) => button.onclick = () => { const [kind, id] = button.dataset.stockSet.split('|'); setStockAction(kind, id); });
 
@@ -1890,13 +1948,13 @@ function bind() {
   const loadMoreCustomersBtn=document.getElementById('loadMoreCustomersBtn');if(loadMoreCustomersBtn)loadMoreCustomersBtn.onclick=()=>{state.customerVisible+=100;render();};
   document.querySelectorAll('[data-save-customer]').forEach((button)=>button.onclick=()=>saveCustomerAction(button.dataset.saveCustomer));
 
-  document.querySelectorAll('[data-open-customer]').forEach((button)=>button.onclick=()=>{state.customerDetailId=button.dataset.openCustomer;render();});
+  document.querySelectorAll('[data-open-customer]').forEach((button)=>button.onclick=()=>loadCustomerDetail(button.dataset.openCustomer));
   const saveCrmCustomerBtn=document.getElementById('saveCrmCustomerBtn');if(saveCrmCustomerBtn)saveCrmCustomerBtn.onclick=saveCrmDetail;
   const addInteractionBtn=document.getElementById('addInteractionBtn');if(addInteractionBtn)addInteractionBtn.onclick=addCustomerInteraction;
   const copyCrmContactBtn=document.getElementById('copyCrmContactBtn');if(copyCrmContactBtn)copyCrmContactBtn.onclick=()=>{const c=(state.adminData.customers||[]).find((x)=>String(x.customerId)===String(state.customerDetailId));if(c)copyText(`${c.tamer||''} ${c.server||''} ${c.contact||''}`.trim());};
   const newPromo=document.getElementById('newPromoBtn'); if(newPromo)newPromo.onclick=()=>{state.promoEdit={status:'ACTIVE',type:'REWARD_PER_SPEND',scope:'ALL',priority:10,stackable:'TRUE'};state.modalDirty.promo=false;render();};
   document.querySelectorAll('[data-edit-promo]').forEach((button)=>button.onclick=()=>{state.promoEdit={...(state.adminData.promotions||[]).find((p)=>p.promotionId===button.dataset.editPromo)};state.modalDirty.promo=false;render();});
-  document.querySelectorAll('[data-delete-promo]').forEach((button)=>button.onclick=async()=>{if(!confirm('ยืนยันลบโปรโมชั่น?'))return;try{await apiPost({action:'deletePromotion',token:state.adminToken,promotionId:button.dataset.deletePromo});toast('ลบโปรโมชั่นแล้ว');await loadAdmin();await loadData(false);}catch(e){toast(e.message);}});
+  document.querySelectorAll('[data-delete-promo]').forEach((button)=>button.onclick=async()=>{if(!confirm('ยืนยันลบโปรโมชั่น?'))return;try{await apiPost({action:'deletePromotion',token:state.adminToken,promotionId:button.dataset.deletePromo});toast('ลบโปรโมชั่นแล้ว');await loadAdmin();state.publicLoadedAt=0;}catch(e){toast(e.message);}});
   const closePromo=document.getElementById('closePromoBtn'); if(closePromo)closePromo.onclick=()=>closeStateModal('promo');
   const closePromoX=document.getElementById('closePromoXBtn');if(closePromoX)closePromoX.onclick=()=>closeStateModal('promo');
   bindModalDirty('promoBackdrop','promo');
@@ -1904,6 +1962,7 @@ function bind() {
 
   const newCategory=document.getElementById('newCategoryBtn');if(newCategory)newCategory.onclick=()=>{state.categoryEdit={kind:'SEAL',value:'',label:'',sortOrder:10,enabled:true};state.modalDirty.category=false;render();};
   document.querySelectorAll('[data-edit-category]').forEach(button=>button.onclick=()=>{const row=productSubcategorySettings().find(item=>item.id===button.dataset.editCategory);state.categoryEdit=row?{...row}:null;state.modalDirty.category=false;render();});
+  document.querySelectorAll('[data-delete-category]').forEach(button=>button.onclick=()=>deleteProductCategoryAction(button.dataset.deleteCategory));
   const saveCategory=document.getElementById('saveCategoryBtn');if(saveCategory)saveCategory.onclick=saveProductCategoryAction;
   const closeCategory=document.getElementById('closeCategoryBtn');if(closeCategory)closeCategory.onclick=()=>closeStateModal('category');
   const closeCategoryX=document.getElementById('closeCategoryXBtn');if(closeCategoryX)closeCategoryX.onclick=()=>closeStateModal('category');

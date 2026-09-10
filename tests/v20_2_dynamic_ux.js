@@ -26,8 +26,15 @@ test('cart mutations preserve page and inner-list scroll',()=>{
 test('dynamic subcategories are additive, future-kind safe and admin managed',()=>{
   ['productSubcategoriesJson','normalizeProductSubcategories','productCategoriesPage','saveProductCategoryAction','subcategoryOptions'].forEach(marker=>assert(gas.includes(marker)||app.includes(marker),`dynamic category marker missing: ${marker}`));
   assert(gas.includes("replace(/[^A-Z0-9_-]/g,'')")&&gas.includes('list.slice(0,500)'),'future kind validation or safety limit is missing');
-  assert(app.includes("['categories', '🗂️ หมวดย่อย']")&&app.includes("state.adminView === 'categories'")&&app.includes('เปิด-ปิดหมวด'),'category admin UI is missing');
+  assert(app.includes("['categories', '🗂️ หมวดย่อย']")&&app.includes("state.adminView === 'categories'")&&app.includes('data-delete-category'),'category admin UI is missing');
+  assert(gas.includes('function productSubcategoryUsage(')&&gas.includes("case'deleteProductSubcategory'"),'safe server-side category deletion is missing');
   assert(!app.slice(app.indexOf('function dynamicEditModalMarkup'),app.indexOf('function adminBootstrapData')).includes("['NORMAL', 'BASE_HARD', 'SUSA'].map"),'dynamic edit wrapper still hard-codes seal categories');
+  const categorySource=app.slice(app.indexOf('const DEFAULT_PRODUCT_SUBCATEGORIES'),app.indexOf('function subcategoriesFor'));
+  const categoryContext={state:{adminData:{settings:{productSubcategoriesJson:'[]'},seals:[],gameItems:[],services:[]},settings:{}},String,Array,JSON,Set,Number,Object,Math,parseInt};
+  vm.createContext(categoryContext);new vm.Script(`${categorySource};globalThis.__categories=productSubcategorySettings;`).runInContext(categoryContext);
+  assert(categoryContext.__categories({productSubcategoriesJson:'[]'}).length===0,'an explicitly empty category list resurrects defaults after the last delete');
+  assert(categoryContext.__categories({}).length>0,'a missing legacy category setting no longer receives safe defaults');
+  assert(app.includes("subcategoriesFor('SEAL')[0]?.value||''")&&app.includes("subcategoryOptions('SEAL',record.section||'')"),'new/blank seals can recreate a deleted default category');
 });
 
 test('order copy template is presentation-only and hides zero-percent details',()=>{
@@ -43,7 +50,7 @@ test('website messages are editable and public-safe',()=>{
 });
 
 test('dashboard scope avoids large order/customer payloads',()=>{
-  const readAdmin=gas.slice(gas.indexOf('function readAdmin('),gas.indexOf('function readPublicAction'));
+  const readAdmin=gas.slice(gas.indexOf('function readAdmin('),gas.indexOf('function normalizeSeal'));
   assert(readAdmin.includes("if(scope==='dashboard')")&&readAdmin.includes('dashboardSummary:dashboardSummary(forceRefresh)'),'compact dashboard summary is not used');
   assert(!readAdmin.includes("needs('dashboard','catalog")&&!readAdmin.includes("needs('dashboard','analytics")&&!readAdmin.includes("needs('dashboard','customers"),'dashboard still loads large lists');
   const summary=gas.slice(gas.indexOf('function dashboardSummary('),gas.indexOf('function readAdmin('));
@@ -51,12 +58,17 @@ test('dashboard scope avoids large order/customer payloads',()=>{
   assert(summary.includes("['id','name','category','status','stock','reservedStock','lowStockAlert']")&&(summary.match(/\.filter\(x=>x\.id&&x\.name\)/g)||[]).length===3,'dashboard no longer preserves product identity filtering');
   assert(gas.includes('s=ss().getSheetByName(name)||sheet(name,HEADERS[key]||[])'),'narrow reads still repeat schema validation on every dashboard sheet');
   assert(gas.includes('if(!maxRows||lastRow<=maxRows+1){const all=s.getDataRange().getDisplayValues()'),'small dashboard sheets still split headers and rows into separate Apps Script service calls');
-  assert(readAdmin.indexOf("if(scope==='dashboard')")<readAdmin.indexOf('settingRows=existingRows(SHEETS.settings)'),'dashboard still waits for full Settings/Users/System reads');
+  assert(readAdmin.indexOf("if(scope==='dashboard')")<readAdmin.indexOf('settingRows=fullSettings?existingRows(SHEETS.settings)'),'dashboard still waits for full Settings/Users/System reads');
+  assert(gas.includes('function cachedAdminScopedSettings(')&&readAdmin.includes('cachedAdminScopedSettings(forceRefresh)'),'non-settings scopes still reread all common Settings/Users/System rows');
+  assert(gas.includes('try{cache.put(ADMIN_SCOPED_SETTINGS_CACHE_KEY')&&gas.includes('catch(ignore){}return all;'),'oversized optional settings cache can still fail an admin read');
+  assert(readAdmin.includes("if(scope==='customers'){customers=rowsTail(SHEETS.customers,1500).reverse()")&&!readAdmin.includes("needs('analytics','reports','orders','customers'"),'customer list still loads full order/interaction history');
+  assert(readAdmin.includes("if(scope==='customerDetail')")&&readAdmin.includes('targetId'),'customer history is not lazy-loaded by selected customer');
+  assert(readAdmin.includes("if(scope==='orders'||all){orders=rows(SHEETS.orders)")&&readAdmin.includes('if(all)result.customerInteractions=rowsTail(SHEETS.customerInteractions,3000).reverse()'),'legacy ALL/order scope no longer preserves full order and CRM compatibility');
   assert(gas.includes("cache.put(ADMIN_DASHBOARD_CACHE_KEY,JSON.stringify(result),30)"),'short dashboard summary cache is missing');
   assert(app.includes("if(state.page==='admin'){state.loading=false;render();if(state.adminToken)loadAdmin(false);}else loadData(true)"),'direct admin route still waits for storefront data');
   assert(app.includes("const ADMIN_NEUTRAL_SETTINGS = Object.freeze({ shopName: 'SHOP DMO', ownerName: '' })")&&app.includes("loadedAdminSettings&&hasOwn(loadedAdminSettings,'shopName')?loadedAdminSettings:ADMIN_NEUTRAL_SETTINGS"),'direct admin shell can still flash the legacy identity');
   assert(app.includes('ADMIN_SHELL_CACHE_KEY')&&app.includes('saveAdminShellCache(next)'),'reload does not restore a safe dashboard shell immediately');
-  assert(app.includes("payload.action === 'getAdminData' || payload.action === 'getFacebookBumpAdminData'")&&app.includes('ระบบหลังบ้านตอบกลับไม่สมบูรณ์'),'read-only backend retry or readable non-JSON error is missing');
+  assert(app.includes("payload.action === 'getAdminData' || payload.action === 'getFacebookBumpAdminData'")&&app.includes('readDeadline = readOnly ? Date.now() + 25000')&&app.includes('ระบบหลังบ้านตอบกลับไม่สมบูรณ์'),'bounded read-only retry or readable non-JSON error is missing');
   assert(gas.includes('parts=cache.getAll(keys)'),'public cache still reads every catalog chunk as a separate Apps Script service call');
 });
 
@@ -65,8 +77,9 @@ test('PWA navigation prefers the current online shell',()=>{
   assert(index.includes('<title>SHOP DMO</title>')&&!index.includes('<title>GUN SHOP DMO</title>'),'static page title can still flash the legacy name');
   assert(config.includes('shopName: "SHOP DMO"')&&config.includes('ownerName: ""'),'config still contains the legacy identity');
   assert(manifest.includes('"name": "SHOP DMO"')&&!manifest.includes('"name": "GUN SHOP DMO"'),'installed PWA still uses the legacy name');
-  assert(serviceWorker.includes("request.mode==='navigate'")&&serviceWorker.includes('event.respondWith(network.catch'),'online navigation is still cache-first');
-  assert(index.includes('20260910-v20.2-admin-shell-performance-4')&&serviceWorker.includes('gun-shop-dmo-v20-2-admin-shell-performance-4'),'PWA cache version is not advanced');
+  assert(serviceWorker.includes("request.mode==='navigate'")&&serviceWorker.includes('Promise.race([network,timeout])'),'online navigation does not use a bounded network-first strategy');
+  assert(serviceWorker.includes('NAVIGATION_NETWORK_TIMEOUT_MS=4000')&&serviceWorker.includes("cache.put('./index.html',response.clone())"),'stalled-navigation fallback or late cache refresh is missing');
+  assert(index.includes('20260910-v20.2-admin-shell-performance-5')&&serviceWorker.includes('gun-shop-dmo-v20-2-admin-shell-performance-5'),'PWA cache version is not advanced');
 });
 
 test('storefront subcategory navigation is prominent and accessible',()=>{

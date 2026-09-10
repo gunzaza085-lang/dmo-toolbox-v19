@@ -147,7 +147,7 @@ check('25. Shop identity settings and blank values', () => {
   assert(app.includes("shopName: document.getElementById('setShopName').value.trim()"), 'ชื่อร้านไม่ได้บันทึกค่าที่ตัดช่องว่างแล้ว');
   assert(app.includes("ownerName: document.getElementById('setOwnerName').value.trim()"), 'ชื่อเจ้าของไม่ได้บันทึกค่าที่ตัดช่องว่างแล้ว');
   const saveSettingsSource = app.slice(app.indexOf('async function saveSettingsAction()'), app.indexOf('async function adjustStockAction'));
-  assert(saveSettingsSource.includes('await loadAdmin(true);') && saveSettingsSource.includes('await loadData(false);'), 'หลังบันทึก Settings ยังใช้ Admin cache เก่า');
+  assert(saveSettingsSource.includes('await loadAdmin(true);') && saveSettingsSource.includes('state.publicLoadedAt=0;'), 'หลังบันทึก Settings ยังใช้ Admin cache เก่าหรือไม่ได้ mark หน้าร้านให้โหลดใหม่');
   const identitySource = app.slice(app.indexOf('const hasOwn ='), app.indexOf('const safeExternalUrl'));
   const identityContext = { cfg:{shopName:'Config Shop',ownerName:'Config Owner'}, state:{settings:{}} };
   vm.createContext(identityContext);
@@ -207,7 +207,7 @@ check('31. Category discount settings UI and additive migration', () => {
   assert(gas.includes("DATABASE_VERSION+'-gate-a-5'"),'schema gate ไม่ได้บังคับ seed Settings ใหม่แบบ additive');
   assert(gas.includes("setNumberFormat('0.##')"),'เซลล์ส่วนลดอาจสืบรูปแบบวันที่จาก Settings แถวก่อนหน้า');
   const settingsSource=app.slice(app.indexOf('function adminSettingsBase'),app.indexOf('function adminLogs'));
-  const settingsContext={state:{adminData:{settings:{categoryDiscountSealPercent:5,categoryDiscountItemPercent:10,categoryDiscountServicePercent:0},security:{actor:{role:'OWNER'}}}},shopIdentity:()=>({shopName:'',ownerName:''}),configuredSettingText:(settings,key,fallback)=>Object.prototype.hasOwnProperty.call(settings,key)?String(settings[key]??''):fallback,settingEnabled:(settings,key,fallback=true)=>Object.prototype.hasOwnProperty.call(settings,key)?settings[key]!==false&&String(settings[key]).toUpperCase()!=='FALSE':fallback,themePalette:()=>({primary:'#2588E8',accent:'#15B7D7',background:'#061121',button:'#0B1C34',important:'#45DEF2'}),DEFAULT_ORDER_COPY_TEMPLATE:'{title}\n{items}\n{pricing}\n{promotions}\n{customer}\n{notice}',html:value=>String(value),String};
+  const settingsContext={state:{adminData:{settings:{categoryDiscountSealPercent:5,categoryDiscountItemPercent:10,categoryDiscountServicePercent:0},security:{actor:{role:'OWNER'}}},servicePosterUpload:null},shopIdentity:()=>({shopName:'',ownerName:''}),configuredSettingText:(settings,key,fallback)=>Object.prototype.hasOwnProperty.call(settings,key)?String(settings[key]??''):fallback,settingEnabled:(settings,key,fallback=true)=>Object.prototype.hasOwnProperty.call(settings,key)?settings[key]!==false&&String(settings[key]).toUpperCase()!=='FALSE':fallback,safeExternalUrl:value=>String(value||''),themePalette:()=>({primary:'#2588E8',accent:'#15B7D7',background:'#061121',button:'#0B1C34',important:'#45DEF2'}),DEFAULT_ORDER_COPY_TEMPLATE:'{title}\n{items}\n{pricing}\n{promotions}\n{customer}\n{notice}',html:value=>String(value),String};
   vm.createContext(settingsContext);
   new vm.Script(`${settingsSource};globalThis.__settingsHtml=adminSettings();`).runInContext(settingsContext);
   ['setCategoryDiscountSeal','setCategoryDiscountItem','setCategoryDiscountService'].forEach(id=>assert(settingsContext.__settingsHtml.includes(`id="${id}"`),`ฟอร์มขาด ${id}`));
@@ -215,9 +215,9 @@ check('31. Category discount settings UI and additive migration', () => {
 });
 
 check('32. Admin scoped loading and large-list performance', () => {
-  assert(gas.includes("readAdmin(actor,body.scope,body.fresh===true)"), 'getAdminData ไม่ส่ง scope/fresh ไป Server');
+  assert(gas.includes("readAdmin(actor,body.scope,body.fresh===true,body.targetId)"), 'getAdminData ไม่ส่ง scope/fresh/targetId ไป Server');
   assert(gas.includes("requestedScope||'ALL'"), 'Client รุ่นเก่าไม่ได้ fallback เป็น ALL');
-  assert(gas.includes("needs('inventory')") && gas.includes("needs('customers')"), 'Server ยังไม่แยกโหลดข้อมูลตามเมนู');
+  assert(gas.includes("needs('inventory')") && gas.includes("scope==='customers'"), 'Server ยังไม่แยกโหลดข้อมูลตามเมนู');
   assert(app.includes("action:'getAdminData',token:state.adminToken,scope,fresh:!!force"), 'Client ไม่ได้ขอข้อมูลตามเมนู');
   assert(app.includes('state.adminLoadedScopes.add(scope)'), 'ไม่มี cache ของ scope ที่โหลดแล้ว');
   assert(app.includes("state.adminView !== 'facebookBump' && !state.adminLoadedScopes.has(state.adminView)"), 'หน้า Admin ยังแสดงข้อมูล bootstrap เป็นศูนย์ก่อน scope โหลดเสร็จ');
@@ -228,7 +228,7 @@ check('32. Admin scoped loading and large-list performance', () => {
   assert(!ordersSource.includes('itemRows.filter('), 'หน้าออเดอร์ยัง scan Order Items ซ้ำต่อออเดอร์');
   ['adminOrderVisible','adminCatalogVisible','inventoryVisible','customerVisible'].forEach(key=>assert(app.includes(key),`ไม่มี batch limit: ${key}`));
   ['loadMoreOrdersBtn','loadMoreAdminCatalogBtn','loadMoreInventoryBtn','loadMoreCustomersBtn'].forEach(id=>assert(app.includes(id),`ไม่มีปุ่มแสดงเพิ่ม: ${id}`));
-  assert(read('index.html').includes('20260910-v20.2-admin-shell-performance-4')&&read('sw.js').includes('gun-shop-dmo-v20-2-admin-shell-performance-4'),'PWA cache version ยังไม่ตรงกับ admin shell/performance build');
+  assert(read('index.html').includes('20260910-v20.2-admin-shell-performance-5')&&read('sw.js').includes('gun-shop-dmo-v20-2-admin-shell-performance-5'),'PWA cache version ยังไม่ตรงกับ admin shell/performance build');
 });
 
 [
