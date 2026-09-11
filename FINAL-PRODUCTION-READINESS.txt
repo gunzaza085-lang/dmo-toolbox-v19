@@ -1,7 +1,7 @@
 GUN SHOP DMO V20.1 - FINAL PRODUCTION READINESS
 ================================================
 Verified: 2026-08-09 (Asia/Bangkok)
-Owner: Natthananat Kawinwatthanakorn
+Owner display: disabled
 Release: V20.1
 Database version: 3.1.0
 Apps Script deployment version: 7

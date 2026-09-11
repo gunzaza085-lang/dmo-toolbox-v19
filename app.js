@@ -4,11 +4,14 @@ const cfg = window.DMO_CONFIG || {};
 const app = document.getElementById('app');
 let apiBusyCount = 0;
 let publicLoadPromise = null;
-let adminLoadPromise = null;
+const adminLoadPromises = new Map();
+const adminFieldAppliedSequence = new Map();
+let adminRequestSequence = 0;
 let productSearchCache = new WeakMap();
 const ADMIN_NEUTRAL_SETTINGS = Object.freeze({ shopName: 'SHOP DMO', ownerName: '' });
 const ADMIN_SHELL_CACHE_KEY = 'dmo_admin_shell_v1';
 const ADMIN_SHELL_CACHE_MAX_AGE_MS = 30 * 60 * 1000;
+const PUBLIC_REFRESH_GATE_KEY = 'dmo_public_refresh_gate_v1';
 const ADMIN_SHELL_SETTING_KEYS = ['shopName','ownerName','themeDefault','themePrimaryColor','themeAccentColor','themeBackgroundColor','themeButtonColor','themeImportantColor','autoLockMinutes'];
 
 function safeAdminShellSettings(settings) {
@@ -24,7 +27,7 @@ function restoreAdminShellCache() {
   try {
     const cached = JSON.parse(sessionStorage.getItem(ADMIN_SHELL_CACHE_KEY) || 'null');
     if (!cached || !cached.savedAt || Date.now() - Number(cached.savedAt) > ADMIN_SHELL_CACHE_MAX_AGE_MS || !cached.dashboardSummary) return null;
-    return { settings: safeAdminShellSettings(cached.settings), dashboardSummary: cached.dashboardSummary, databaseVersion: String(cached.databaseVersion || '') };
+    return { savedAt: Number(cached.savedAt), settings: safeAdminShellSettings(cached.settings), dashboardSummary: cached.dashboardSummary, databaseVersion: String(cached.databaseVersion || '') };
   } catch (error) { return null; }
 }
 
@@ -60,7 +63,10 @@ const state = {
   adminData: null,
   adminLoading: false,
   adminLoadedAt: 0,
+  adminLoadedAtByScope: {},
   adminLoadedScopes: new Set(),
+  adminLoadingScopes: new Set(),
+  adminScopeErrors: {},
   loginSubmitting: false,
   adminUser: JSON.parse(sessionStorage.getItem('dmo_admin_user') || 'null'),
   lastAdminActivity: Number(sessionStorage.getItem('dmo_admin_activity') || Date.now()),
@@ -125,6 +131,8 @@ const state = {
 if (state.adminToken && initialAdminShell) {
   state.adminData = { ...adminBootstrapData(), ...initialAdminShell, security: { actor: state.adminUser || {} } };
   state.adminLoadedScopes.add('dashboard');
+  state.adminLoadedAt = initialAdminShell.savedAt;
+  state.adminLoadedAtByScope.dashboard = initialAdminShell.savedAt;
 }
 
 let inputRenderTimer = 0;
@@ -223,8 +231,8 @@ function configuredSettingText(settings, key, fallback = '') {
 }
 function shopIdentity(settings = state.settings) {
   return {
-    shopName: configuredSettingText(settings, 'shopName', 'GUN SHOP DMO'),
-    ownerName: configuredSettingText(settings, 'ownerName', 'Natthananat Kawinwatthanakorn'),
+    shopName: configuredSettingText(settings, 'shopName', 'SHOP DMO'),
+    ownerName: configuredSettingText(settings, 'ownerName', ''),
   };
 }
 const DEFAULT_PRODUCT_SUBCATEGORIES=[
@@ -359,8 +367,8 @@ async function apiPost(payload) {
   apiBusyCount += 1;document.body.dataset.busyMessage=busyMessages[payload.action]||'กำลังดำเนินการ กรุณารอสักครู่…';document.body.classList.add('api-busy');
   try {
     const readOnly = payload.action === 'getAdminData' || payload.action === 'getFacebookBumpAdminData';
-    const readDeadline = readOnly ? Date.now() + 25000 : 0;
-    const requestTimeout = () => readOnly ? Math.max(1000, Math.min(22000, readDeadline - Date.now())) : payload.action === 'login' ? 25000 : 45000;
+    const readDeadline = readOnly ? Date.now() + 30000 : 0;
+    const requestTimeout = () => readOnly ? Math.max(1000, Math.min(26000, readDeadline - Date.now())) : payload.action === 'login' ? 25000 : 45000;
     const send = () => fetchApiJson(cfg.sheetsUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
@@ -369,7 +377,7 @@ async function apiPost(payload) {
     let data;
     try { data = await send(); }
     catch (error) {
-      if (!readOnly || !error?.retryable || readDeadline-Date.now()<1500) throw error;
+      if (!readOnly || !error?.retryable || readDeadline-Date.now()<9000) throw error;
       await new Promise((resolve) => setTimeout(resolve, 600));
       data = await send();
     }
@@ -388,19 +396,38 @@ function applyPublicData(data,offline=false){
   state.moneyT=data.moneyT?{...data.moneyT,kind:'TMONEY',unit:'T'}:null;
   state.promotions=data.promotions||[];state.settings=data.settings||{};state.updatedAt=data.updatedAt||data.stockUpdatedAt||'';state.offline=offline;productSearchCache=new WeakMap();
 }
-function restorePublicCache(){
-  try{const cached=JSON.parse(localStorage.getItem('dmo_public_cache')||'null'),maxHours=Number((cached&&cached.data&&cached.data.settings&&cached.data.settings.offlineCacheHours)||state.settings.offlineCacheHours||12);if(cached&&cached.data&&Date.now()-Number(cached.savedAt||0)<=maxHours*3600000){applyPublicData(cached.data,true);return true;}}catch(error){}return false;
+function restorePublicCache(offline=true){
+  try{const cached=JSON.parse(localStorage.getItem('dmo_public_cache')||'null'),maxHours=Number((cached&&cached.data&&cached.data.settings&&cached.data.settings.offlineCacheHours)||state.settings.offlineCacheHours||12);if(cached&&cached.data&&Date.now()-Number(cached.savedAt||0)<=maxHours*3600000){applyPublicData(cached.data,offline);state.publicLoadedAt=Number(cached.savedAt||0);return true;}}catch(error){}return false;
 }
 async function loadData(showLoading = true) {
   if(publicLoadPromise)return publicLoadPromise;
   const restored=showLoading&&restorePublicCache();
   if(showLoading&&!restored){state.loading=true;render();}else if(restored){state.loading=false;render();}
   publicLoadPromise=(async()=>{try{
-    const data=await apiGet(false);applyPublicData(data,false);state.publicLoadedAt=Date.now();
+    const data=await apiGet(false);applyPublicData(data,false);state.publicLoadedAt=Date.now();markPublicRefreshGate(state.publicLoadedAt);
     try{localStorage.setItem('dmo_public_cache',JSON.stringify({savedAt:Date.now(),data}));}catch(error){}
     state.loading=false;render();
   }catch(error){const cacheAvailable=restored||restorePublicCache();state.loading=false;render();toast(cacheAvailable?'ออฟไลน์: ใช้ข้อมูลล่าสุดที่บันทึกไว้':error.message);}finally{publicLoadPromise=null;}})();
   return publicLoadPromise;
+}
+
+function publicRefreshIntervalMs(){const settingSeconds=Number(state.settings?.autoRefreshSeconds);return Math.max(30000,settingSeconds>0?settingSeconds*1000:Number(cfg.refreshMs)||60000);}
+function markPublicRefreshGate(at=Date.now()){try{localStorage.setItem(PUBLIC_REFRESH_GATE_KEY,String(at));}catch(error){}}
+function sharedPublicRefreshAt(){try{return Number(localStorage.getItem(PUBLIC_REFRESH_GATE_KEY)||0);}catch(error){return 0;}}
+function publicRefreshDue(now=Date.now()){
+  if(state.page==='admin'||document.visibilityState==='hidden'||publicLoadPromise)return false;
+  return now-Math.max(Number(state.publicLoadedAt||0),sharedPublicRefreshAt())>=publicRefreshIntervalMs();
+}
+async function autoRefreshPublicUnlocked(){
+  if(state.page!=='admin'&&document.visibilityState!=='hidden'&&sharedPublicRefreshAt()>Number(state.publicLoadedAt||0)&&restorePublicCache(false))render();
+  if(!publicRefreshDue())return false;
+  markPublicRefreshGate();
+  await loadData(false);
+  return true;
+}
+async function autoRefreshPublic(){
+  if(navigator.locks?.request)return navigator.locks.request(PUBLIC_REFRESH_GATE_KEY,{mode:'exclusive',ifAvailable:true},lock=>lock?autoRefreshPublicUnlocked():false);
+  return autoRefreshPublicUnlocked();
 }
 
 function customerNav() {
@@ -722,7 +749,8 @@ function adminPage() {
 function adminContent() {
   if (state.adminView !== 'facebookBump' && !state.adminLoadedScopes.has(state.adminView)) {
     if (state.adminView === 'dashboard') return dashboardPage();
-    return `<section class="panel empty"><span class="loading"></span> ${state.adminLoading ? 'กำลังโหลดข้อมูลหลังร้าน...' : 'ยังโหลดข้อมูลเมนูนี้ไม่สำเร็จ'}${state.adminLoading ? '' : '<br><button class="btn primary" id="retryAdminScopeBtn">ลองโหลดอีกครั้ง</button>'}</section>`;
+    const scopeLoading=state.adminLoadingScopes.has(state.adminView),scopeError=state.adminScopeErrors[state.adminView]||'';
+    return `<section class="panel empty">${scopeLoading?'<span class="loading"></span> ':''}${scopeLoading?'กำลังโหลดข้อมูลเมนูนี้...':html(scopeError||'ยังโหลดข้อมูลเมนูนี้ไม่สำเร็จ')}${scopeLoading?'':'<br><button class="btn primary" id="retryAdminScopeBtn">ลองโหลดอีกครั้ง</button>'}</section>`;
   }
   if (state.adminView === 'catalog') return adminCatalog();
   if (state.adminView === 'images') return imageManagementPage();
@@ -836,7 +864,7 @@ function dashboardPage() {
   const categoryCounts = ['AT', 'HT', 'CT', 'HP', 'DS', 'DE', 'EV', 'BL'].map((category) => [category, (state.adminData?.seals || []).filter((x) => x.category === category).length]);
   const summary=state.adminData?.dashboardSummary||{newOrders:(state.adminData?.orders||[]).filter(x=>x.status==='NEW').length,preparingOrders,readyOrders,completedOrders:completedOrders.length,salesTotal,lowStock,checkOrOut:check+out,customerCount:(state.adminData?.customers||[]).length,repeatCustomers,activePromos:(state.adminData?.promotions||[]).filter(x=>x.status==='ACTIVE').length,categoryCounts};
   const summaryCategories=summary.categoryCounts||categoryCounts,summaryMax=Math.max(1,...summaryCategories.map(([,count])=>count));
-  return `<section class="panel"><div class="admin-toolbar"><div><h2 class="panel-title">ภาพรวมร้านวันนี้</h2><p class="product-meta">ออเดอร์ งานจัดของ ยอดขาย และสิ่งที่ต้องจัดการในหน้าเดียว</p></div><div class="stack admin-dashboard-actions">${state.adminLoading?'<span class="product-meta"><span class="loading"></span> กำลังอัปเดตข้อมูลล่าสุด…</span>':''}<button class="btn primary" data-admin-view="orders">เปิดศูนย์ออเดอร์</button></div></div><div class="metrics commerce-metrics"><div class="metric urgent">ออเดอร์ใหม่<b>${summary.newOrders}</b><small>รอตรวจสอบ</small></div><div class="metric">กำลังจัดการ<b>${summary.preparingOrders}</b><small>ตรวจและจัดของ</small></div><div class="metric ready">พร้อมส่ง<b>${summary.readyOrders}</b><small>รอส่งลูกค้า</small></div><div class="metric sales">ยอดขายสำเร็จ<b>${money(summary.salesTotal)} บาท</b><small>${summary.completedOrders} ออเดอร์</small></div><div class="metric warning">สินค้าใกล้หมด<b>${summary.lowStock}</b><small>ควรเติมสต๊อก</small></div><div class="metric danger">สินค้าหมด/ต้องเช็ก<b>${summary.checkOrOut}</b><small>ต้องตรวจสอบ</small></div><div class="metric">ลูกค้าซื้อซ้ำ<b>${summary.repeatCustomers}</b><small>จาก ${summary.customerCount} คน</small></div><div class="metric">โปรที่เปิดใช้<b>${summary.activePromos}</b><small>กำลังทำงาน</small></div></div><div class="dashboard-sections"><div><h3>สรุปสินค้า</h3><div class="category-bars">${summaryCategories.map(([category,count])=>`<div class="bar-row"><b>${category}</b><div class="bar-track"><div class="bar-fill" style="width:${(count/summaryMax)*100}%"></div></div><span>${count}</span></div>`).join('')}</div></div><div class="attention-card"><h3>สิ่งที่ควรทำก่อน</h3><ol><li>ตรวจออเดอร์ใหม่ ${summary.newOrders} รายการ</li><li>จัดออเดอร์ที่กำลังดำเนินการ ${summary.preparingOrders} รายการ</li><li>ส่งมอบออเดอร์พร้อมส่ง ${summary.readyOrders} รายการ</li><li>ตรวจสินค้าสต๊อกต่ำ/หมด ${summary.lowStock+summary.checkOrOut} รายการ</li></ol></div></div></section>`;
+  return `<section class="panel"><div class="admin-toolbar"><div><h2 class="panel-title">ภาพรวมร้านวันนี้</h2><p class="product-meta">ออเดอร์ งานจัดของ ยอดขาย และสิ่งที่ต้องจัดการในหน้าเดียว</p></div><div class="stack admin-dashboard-actions">${state.adminLoadingScopes.has('dashboard')?'<span class="product-meta"><span class="loading"></span> กำลังอัปเดตข้อมูลล่าสุด…</span>':''}<button class="btn primary" data-admin-view="orders">เปิดศูนย์ออเดอร์</button></div></div><div class="metrics commerce-metrics"><div class="metric urgent">ออเดอร์ใหม่<b>${summary.newOrders}</b><small>รอตรวจสอบ</small></div><div class="metric">กำลังจัดการ<b>${summary.preparingOrders}</b><small>ตรวจและจัดของ</small></div><div class="metric ready">พร้อมส่ง<b>${summary.readyOrders}</b><small>รอส่งลูกค้า</small></div><div class="metric sales">ยอดขายสำเร็จ<b>${money(summary.salesTotal)} บาท</b><small>${summary.completedOrders} ออเดอร์</small></div><div class="metric warning">สินค้าใกล้หมด<b>${summary.lowStock}</b><small>ควรเติมสต๊อก</small></div><div class="metric danger">สินค้าหมด/ต้องเช็ก<b>${summary.checkOrOut}</b><small>ต้องตรวจสอบ</small></div><div class="metric">ลูกค้าซื้อซ้ำ<b>${summary.repeatCustomers}</b><small>จาก ${summary.customerCount} คน</small></div><div class="metric">โปรที่เปิดใช้<b>${summary.activePromos}</b><small>กำลังทำงาน</small></div></div><div class="dashboard-sections"><div><h3>สรุปสินค้า</h3><div class="category-bars">${summaryCategories.map(([category,count])=>`<div class="bar-row"><b>${category}</b><div class="bar-track"><div class="bar-fill" style="width:${(count/summaryMax)*100}%"></div></div><span>${count}</span></div>`).join('')}</div></div><div class="attention-card"><h3>สิ่งที่ควรทำก่อน</h3><ol><li>ตรวจออเดอร์ใหม่ ${summary.newOrders} รายการ</li><li>จัดออเดอร์ที่กำลังดำเนินการ ${summary.preparingOrders} รายการ</li><li>ส่งมอบออเดอร์พร้อมส่ง ${summary.readyOrders} รายการ</li><li>ตรวจสินค้าสต๊อกต่ำ/หมด ${summary.lowStock+summary.checkOrOut} รายการ</li></ol></div></div></section>`;
 }
 
 function calculatorPage() {
@@ -1423,37 +1451,82 @@ function adminBootstrapData() {
   return {seals:state.seals||[],gameItems:state.items||[],services:state.services||[],moneyT:state.moneyT||null,settings:{...ADMIN_NEUTRAL_SETTINGS},dashboardSummary:null,orders:[],deletedOrders:[],orderItems:[],logs:[],stockLogs:[],stockUpdatedAt:'',customers:[],customerInteractions:[],promotions:state.promotions||[],trash:[],security:{actor:state.adminUser||{}},automation:{},facebookBump:null,databaseVersion:''};
 }
 
+function applyAdminResponseField(next,data,key,sequence){
+  if(!hasOwn(data,key)||sequence<Number(adminFieldAppliedSequence.get(key)||0))return;
+  next[key]=data[key];adminFieldAppliedSequence.set(key,sequence);
+}
+
+function applyAdminSecurity(next,data,scope,sequence){
+  if(!data.security)return;
+  const current=next.security||{},incoming=data.security||{},merged={...current};
+  ['actor','account'].forEach(group=>{
+    if(!incoming[group])return;
+    const nested={...(current[group]||{})};
+    Object.entries(incoming[group]).forEach(([key,value])=>{const marker=`security.${group}.${key}`;if(sequence>=Number(adminFieldAppliedSequence.get(marker)||0)){nested[key]=value;adminFieldAppliedSequence.set(marker,sequence);}});
+    merged[group]=nested;
+  });
+  const scalarKeys=['environment','autoLockMinutes'];
+  if(scope!=='dashboard')scalarKeys.push('sessionDays');
+  if(scope==='settings'||scope==='security'||scope==='ALL')scalarKeys.push('apiKeyConfigured');
+  scalarKeys.forEach(key=>{if(!hasOwn(incoming,key))return;const marker=`security.${key}`;if(sequence>=Number(adminFieldAppliedSequence.get(marker)||0)){merged[key]=incoming[key];adminFieldAppliedSequence.set(marker,sequence);}});
+  if((scope==='security'||scope==='ALL')&&Array.isArray(incoming.users)){const marker='security.users';if(sequence>=Number(adminFieldAppliedSequence.get(marker)||0)){merged.users=incoming.users;adminFieldAppliedSequence.set(marker,sequence);}}
+  next.security=merged;
+}
+
+function applyAdminSettings(next,data,sequence){
+  if(!hasOwn(data,'settings')||!data.settings)return;
+  const merged={...(next.settings||{})};
+  Object.entries(data.settings).forEach(([key,value])=>{const marker=`settings.${key}`;if(sequence>=Number(adminFieldAppliedSequence.get(marker)||0)){merged[key]=value;adminFieldAppliedSequence.set(marker,sequence);}});
+  next.settings=merged;
+}
+
+function resetAdminRequestState(){adminLoadPromises.clear();state.adminLoadingScopes.clear();state.adminLoading=false;adminFieldAppliedSequence.clear();}
+
 async function loadAdmin(force = true, scope = state.adminView || 'dashboard') {
   scope=String(scope||'dashboard');
-  if(state.adminLoading){await adminLoadPromise;if(!state.adminLoadedScopes.has(scope))return loadAdmin(force,scope);return;}
-  if(force)state.adminLoadedScopes.delete(scope);
-  if (!force && state.adminData && state.adminLoadedScopes.has(scope) && state.adminLoadedAt && Date.now() - state.adminLoadedAt < 30000) { render(); return; }
-  state.adminLoading = true;
+  const active=adminLoadPromises.get(scope);
+  if(active){
+    if(!force||active.force)return active.promise;
+    await active.promise;
+    if(!state.adminToken)return;
+    return loadAdmin(true,scope);
+  }
+  const loadedAt=Number(state.adminLoadedAtByScope[scope]||0);
+  if (!force && state.adminData && state.adminLoadedScopes.has(scope) && loadedAt && Date.now() - loadedAt < 30000) { render(); return; }
+  const tokenAtStart=state.adminToken,requestSequence=++adminRequestSequence;
+  state.adminLoadingScopes.add(scope);state.adminLoading = true;delete state.adminScopeErrors[scope];
   if (!state.adminData) state.adminData = adminBootstrapData();
   render();
-  adminLoadPromise=(async()=>{try {
+  const request=(async()=>{try {
     const data = await apiPost({action:'getAdminData',token:state.adminToken,scope,fresh:!!force}),next={...(state.adminData||adminBootstrapData())};
-    ['seals','gameItems','services','moneyT','dashboardSummary','orders','deletedOrders','orderItems','logs','stockLogs','stockUpdatedAt','customers','customerInteractions','promotions','trash','security','automation','databaseVersion'].forEach(key=>{if(hasOwn(data,key))next[key]=data[key];});
-    if(hasOwn(data,'settings'))next.settings={...(next.settings||{}),...data.settings};
-    if(hasOwn(data,'facebookBump'))next.facebookBump=data.facebookBump;
+    if(!state.adminToken||state.adminToken!==tokenAtStart)return;
+    ['seals','gameItems','services','moneyT','dashboardSummary','orders','deletedOrders','orderItems','logs','stockLogs','stockUpdatedAt','customers','customerInteractions','promotions','trash','automation','databaseVersion'].forEach(key=>applyAdminResponseField(next,data,key,requestSequence));
+    applyAdminSettings(next,data,requestSequence);
+    applyAdminSecurity(next,data,scope,requestSequence);
+    if(hasOwn(data,'facebookBump'))applyAdminResponseField(next,data,'facebookBump',requestSequence);
     state.adminData=next;state.adminLoadedScopes.add(scope);
-    state.adminLoadedAt = Date.now();
+    state.adminLoadedAt = Date.now();state.adminLoadedAtByScope[scope]=state.adminLoadedAt;
     if(next.dashboardSummary)saveAdminShellCache(next);
     if(data.security&&data.security.actor){state.adminUser={...(state.adminUser||{}),...data.security.actor};sessionStorage.setItem('dmo_admin_user',JSON.stringify(state.adminUser));}
   } catch (error) {
+    if(tokenAtStart!==state.adminToken)return;
+    state.adminScopeErrors[scope]=error.message;
     if (/เข้าสู่ระบบ/.test(error.message)) {
       state.adminToken = '';
       state.adminData = null;
+      state.adminLoadedScopes=new Set();state.adminLoadedAtByScope={};
       state.adminUser = null;
       sessionStorage.removeItem('dmo_admin_token');
       sessionStorage.removeItem('dmo_admin_user');
       clearAdminShellCache();
     }
-    toast(error.message);
+    if(state.page==='admin'&&state.adminView===scope)toast(error.message);
   } finally {
-    state.adminLoading = false;adminLoadPromise=null;render();
+    const current=adminLoadPromises.get(scope);if(current&&current.promise===request){adminLoadPromises.delete(scope);state.adminLoadingScopes.delete(scope);}
+    state.adminLoading=adminLoadPromises.size>0;render();
   }})();
-  return adminLoadPromise;
+  adminLoadPromises.set(scope,{promise:request,force:!!force});
+  return request;
 }
 
 async function loadFacebookBumpAdminData() {
@@ -1845,9 +1918,9 @@ function bind() {
   const favoriteCart=document.getElementById('favoriteCartBtn');if(favoriteCart)favoriteCart.onclick=()=>{state.cart.forEach((item)=>{const p=allProducts().find((x)=>x.id===item.id&&x.kind===item.kind);if(p&&!isFavorite(p))state.favoriteKeys.push(productKey(p));});state.favoriteKeys=[...new Set(state.favoriteKeys)].slice(0,300);localStorage.setItem('dmo_favorites',JSON.stringify(state.favoriteKeys));toast('บันทึกรายการโปรดแล้ว');render();};
   const saveOrder = document.getElementById('saveOrderBtn'); if (saveOrder) saveOrder.onclick = async () => { if(state.orderSubmitting)return;try { const remaining=Math.ceil((state.orderCooldownUntil-Date.now())/1000);if(remaining>0)throw Error(`กรุณารอ ${remaining} วินาทีก่อนส่งออเดอร์ใหม่`);const customer = customerValues(); if(!customer.tamer.trim()) throw Error('กรุณากรอกชื่อเทมเมอร์'); if(!customer.contact.trim()) throw Error('กรุณากรอกชื่อ Facebook'); if(!state.cart.length) throw Error('ยังไม่มีสินค้าในรายการ');const fingerprint=JSON.stringify({customer,items:state.cart.map(x=>({id:x.id,kind:x.kind,quantity:x.quantity}))});if(state.pendingOrderFingerprint!==fingerprint){state.pendingOrderFingerprint=fingerprint;state.pendingOrderRequestId=(crypto.randomUUID?crypto.randomUUID():`${Date.now()}-${Math.random().toString(16).slice(2)}`);}const website=document.getElementById('orderWebsite')?.value||'';state.orderSubmitting=true;render();const data = await apiPost({ action: 'createOrder', requestId:state.pendingOrderRequestId, customer, items: state.cart, website, startedAt:state.orderFormStartedAt }); if(!data.orderId) throw Error('ระบบยังไม่เปิดรับออเดอร์ กรุณาติดต่อร้าน'); saveRecentOrderSnapshot(data.orderId); state.orderSuccess={orderId:data.orderId,total:Number(data.total||0),discount:Number(data.discount||0)};const cooldown=Math.max(5,Math.min(120,Number(state.settings.orderSubmitCooldownSeconds)||30));state.orderCooldownUntil=Date.now()+cooldown*1000;localStorage.setItem('dmo_order_cooldown_until',String(state.orderCooldownUntil));state.orderFormStartedAt=Date.now();state.cart=[];state.pendingOrderRequestId='';state.pendingOrderFingerprint='';state.orderSubmitting=false;render();setTimeout(()=>{if(state.page==='shop')render();},cooldown*1000+100);window.scrollTo({top:0,behavior:'smooth'}); } catch (error) { state.orderSubmitting=false;render();toast(error.message); } };
   const adminEntry = document.getElementById('adminEntry'); if (adminEntry) adminEntry.onclick = () => { state.page = 'admin'; location.hash = 'admin'; if (state.adminToken) loadAdmin(false); else render(); };
-  const backShop = document.getElementById('backShopBtn'); if (backShop) backShop.onclick = () => { state.page = 'shop'; location.hash = ''; if(!state.publicLoadedAt)loadData(true);else render(); };
-  const login = document.getElementById('loginBtn'); if (login) login.onclick = async () => { if(state.loginSubmitting)return;const adminId=document.getElementById('adminId').value,password=document.getElementById('adminPassword').value;state.loginSubmitting=true;render();try { const data = await apiPost({ action: 'login', adminId, password }); state.loginSubmitting=false;state.adminToken = data.token; state.adminUser=data.user||null;state.adminData=adminBootstrapData();state.adminLoadedAt=0;state.adminLoadedScopes=new Set(); state.lastAdminActivity=Date.now(); sessionStorage.setItem('dmo_admin_token', data.token); sessionStorage.setItem('dmo_admin_user',JSON.stringify(state.adminUser)); sessionStorage.setItem('dmo_admin_activity',String(state.lastAdminActivity));render();await loadAdmin(false); } catch (error) { state.loginSubmitting=false;render();toast(error.message); } };
-  const logout = document.getElementById('logoutBtn'); if (logout) logout.onclick = async () => { try{await apiPost({action:'logout',token:state.adminToken});}catch(e){} state.adminToken = ''; state.adminData = null;state.adminLoadedScopes=new Set(); state.adminUser=null; sessionStorage.removeItem('dmo_admin_token');sessionStorage.removeItem('dmo_admin_user');sessionStorage.removeItem('dmo_admin_activity');clearAdminShellCache(); render(); };
+  const backShop = document.getElementById('backShopBtn'); if (backShop) backShop.onclick = () => { state.page = 'shop'; location.hash = ''; if(!state.publicLoadedAt)loadData(true);else{render();autoRefreshPublic();} };
+  const login = document.getElementById('loginBtn'); if (login) login.onclick = async () => { if(state.loginSubmitting)return;const adminId=document.getElementById('adminId').value,password=document.getElementById('adminPassword').value;state.loginSubmitting=true;render();try { const data = await apiPost({ action:'login',adminId,password }); state.loginSubmitting=false;resetAdminRequestState();state.adminToken=data.token;state.adminUser=data.user||null;state.adminData=adminBootstrapData();state.adminLoadedAt=0;state.adminLoadedAtByScope={};state.adminLoadedScopes=new Set();state.adminScopeErrors={};state.lastAdminActivity=Date.now();sessionStorage.setItem('dmo_admin_token',data.token);sessionStorage.setItem('dmo_admin_user',JSON.stringify(state.adminUser));sessionStorage.setItem('dmo_admin_activity',String(state.lastAdminActivity));render();await loadAdmin(false); } catch (error) { state.loginSubmitting=false;render();toast(error.message); } };
+  const logout = document.getElementById('logoutBtn'); if (logout) logout.onclick = async () => { try{await apiPost({action:'logout',token:state.adminToken});}catch(e){} state.adminToken='';state.adminData=null;state.adminLoadedScopes=new Set();state.adminLoadedAtByScope={};state.adminScopeErrors={};resetAdminRequestState();state.adminUser=null;sessionStorage.removeItem('dmo_admin_token');sessionStorage.removeItem('dmo_admin_user');sessionStorage.removeItem('dmo_admin_activity');clearAdminShellCache();render(); };
   document.querySelectorAll('[data-admin-view]').forEach((button) => button.onclick = async () => {
     state.adminView = button.dataset.adminView;
     render();
@@ -2007,6 +2080,7 @@ document.addEventListener('click',(event)=>{const button=event.target.closest('b
 if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('./sw.js').catch(()=>{}));}
 applyTheme();
 
-window.addEventListener('hashchange', () => { state.page = location.hash === '#admin' ? 'admin' : 'shop'; if(state.page==='admin'){if(state.adminToken)loadAdmin(false);else render();}else if(!state.publicLoadedAt)loadData(true);else render(); });
-if(state.page==='admin'){state.loading=false;render();if(state.adminToken)loadAdmin(false);}else loadData(true);
-setInterval(() => { if (state.page !== 'admin') loadData(false); }, Number(cfg.refreshMs) || 60000);
+window.addEventListener('hashchange', () => { state.page = location.hash === '#admin' ? 'admin' : 'shop'; if(state.page==='admin'){if(state.adminToken)loadAdmin(false);else render();}else if(!state.publicLoadedAt)loadData(true);else{render();autoRefreshPublic();} });
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){if(state.page!=='admin'&&!state.publicLoadedAt)loadData(true);else autoRefreshPublic();}});
+if(state.page==='admin'){state.loading=false;render();if(state.adminToken)loadAdmin(false);}else if(document.visibilityState==='hidden'){state.loading=false;restorePublicCache();render();}else loadData(true);
+setInterval(autoRefreshPublic,15000);

@@ -59,17 +59,60 @@ test('dashboard scope avoids large order/customer payloads',()=>{
   assert(gas.includes('s=ss().getSheetByName(name)||sheet(name,HEADERS[key]||[])'),'narrow reads still repeat schema validation on every dashboard sheet');
   assert(gas.includes('if(!maxRows||lastRow<=maxRows+1){const all=s.getDataRange().getDisplayValues()'),'small dashboard sheets still split headers and rows into separate Apps Script service calls');
   assert(readAdmin.indexOf("if(scope==='dashboard')")<readAdmin.indexOf('settingRows=fullSettings?existingRows(SHEETS.settings)'),'dashboard still waits for full Settings/Users/System reads');
-  assert(gas.includes('function cachedAdminScopedSettings(')&&readAdmin.includes('cachedAdminScopedSettings(forceRefresh)'),'non-settings scopes still reread all common Settings/Users/System rows');
+  assert(gas.includes('function cachedAdminScopedSettings(')&&readAdmin.includes('cachedAdminScopedSettings(false)'),'non-settings scope refresh still rereads unrelated Settings rows');
+  assert(gas.includes('const scoped=cachedAdminScopedSettings(forceRefresh)'),'Dashboard and later admin sections do not share the Settings read');
   assert(gas.includes('try{cache.put(ADMIN_SCOPED_SETTINGS_CACHE_KEY')&&gas.includes('catch(ignore){}return all;'),'oversized optional settings cache can still fail an admin read');
   assert(readAdmin.includes("if(scope==='customers'){customers=rowsTail(SHEETS.customers,1500).reverse()")&&!readAdmin.includes("needs('analytics','reports','orders','customers'"),'customer list still loads full order/interaction history');
   assert(readAdmin.includes("if(scope==='customerDetail')")&&readAdmin.includes('targetId'),'customer history is not lazy-loaded by selected customer');
   assert(readAdmin.includes("if(scope==='orders'||all){orders=rows(SHEETS.orders)")&&readAdmin.includes('if(all)result.customerInteractions=rowsTail(SHEETS.customerInteractions,3000).reverse()'),'legacy ALL/order scope no longer preserves full order and CRM compatibility');
-  assert(gas.includes("cache.put(ADMIN_DASHBOARD_CACHE_KEY,JSON.stringify(result),30)"),'short dashboard summary cache is missing');
-  assert(app.includes("if(state.page==='admin'){state.loading=false;render();if(state.adminToken)loadAdmin(false);}else loadData(true)"),'direct admin route still waits for storefront data');
+  assert(gas.includes("cache.put(ADMIN_DASHBOARD_CACHE_KEY,JSON.stringify(result),180)"),'bounded dashboard summary cache is missing');
+  ['archiveOrder','restoreArchivedOrder','restoreBackup'].forEach(action=>assert(gas.slice(gas.indexOf('const PUBLIC_CACHE_MUTATIONS='),gas.indexOf('function doGet(')).includes(`'${action}'`),`dashboard cache is not invalidated by ${action}`));
+  const archiveSource=gas.slice(gas.indexOf('function archiveOrder('),gas.indexOf('function uploadImage('));
+  assert((archiveSource.match(/invalidatePublicCache\(\);invalidateAdminDashboardCaches\(\)/g)||[]).length>=2,'archive/restore can leave a concurrently repopulated Dashboard cache stale');
+  const restoreSource=gas.slice(gas.indexOf('function restoreBackupAction('),gas.indexOf('function deleteBackupAction('));
+  assert(restoreSource.includes("deleteProperty('DATABASE_SCHEMA_READY_'")&&restoreSource.includes('ensureDatabase();')&&restoreSource.includes('invalidatePublicCache();invalidateAdminDashboardCaches();'),'backup restore does not revalidate schema and clear post-mutation caches');
+  assert(gas.includes('let ACTIVE_SPREADSHEET=null;')&&gas.includes('ACTIVE_SPREADSHEET||(ACTIVE_SPREADSHEET=SpreadsheetApp.getActiveSpreadsheet())'),'one request repeatedly resolves the active spreadsheet');
+  assert(gas.includes("const needsUsers=all||scope==='security'")&&!readAdmin.includes('userRows=fullSettings?existingRows(SHEETS.users)'), 'Settings still reads the Security user directory');
+  const rowHelpers=gas.slice(gas.indexOf('function rows(name)'),gas.indexOf('function existingRows(name)'));
+  assert(rowHelpers.includes('ss().getSheetByName(name)||sheet(name,HEADERS[key]||[])'),'established reads still revalidate the full schema');
+  assert(rowHelpers.includes('if(lastRow<=maxRows+1){const all=s.getDataRange().getDisplayValues()'),'small tail reads still split header and rows into extra service calls');
+  const startup=app.slice(app.lastIndexOf("window.addEventListener('hashchange'"));
+  assert(startup.includes("if(state.page==='admin'){state.loading=false;render();if(state.adminToken)loadAdmin(false);}")&&startup.indexOf("if(state.page==='admin')")<startup.lastIndexOf('loadData(true)'),'direct admin route still waits for storefront data');
   assert(app.includes("const ADMIN_NEUTRAL_SETTINGS = Object.freeze({ shopName: 'SHOP DMO', ownerName: '' })")&&app.includes("loadedAdminSettings&&hasOwn(loadedAdminSettings,'shopName')?loadedAdminSettings:ADMIN_NEUTRAL_SETTINGS"),'direct admin shell can still flash the legacy identity');
   assert(app.includes('ADMIN_SHELL_CACHE_KEY')&&app.includes('saveAdminShellCache(next)'),'reload does not restore a safe dashboard shell immediately');
-  assert(app.includes("payload.action === 'getAdminData' || payload.action === 'getFacebookBumpAdminData'")&&app.includes('readDeadline = readOnly ? Date.now() + 25000')&&app.includes('ระบบหลังบ้านตอบกลับไม่สมบูรณ์'),'bounded read-only retry or readable non-JSON error is missing');
+  assert(app.includes("payload.action === 'getAdminData' || payload.action === 'getFacebookBumpAdminData'")&&app.includes('readDeadline = readOnly ? Date.now() + 30000')&&app.includes('Math.min(26000, readDeadline - Date.now())')&&app.includes('readDeadline-Date.now()<9000')&&app.includes('ระบบหลังบ้านตอบกลับไม่สมบูรณ์'),'bounded read-only retry or readable non-JSON error is missing');
   assert(gas.includes('parts=cache.getAll(keys)'),'public cache still reads every catalog chunk as a separate Apps Script service call');
+});
+
+test('admin navigation is not serialized behind a slow scope and refresh stays usable',()=>{
+  const source=app.slice(app.indexOf('async function loadAdmin('),app.indexOf('async function loadFacebookBumpAdminData('));
+  assert(app.includes('const adminLoadPromises = new Map()')&&source.includes('adminLoadPromises.get(scope)')&&source.includes('adminLoadPromises.set(scope,{promise:request,force:!!force})'),'admin requests are still serialized through one global promise');
+  assert(source.includes('state.adminLoadingScopes.add(scope)')&&app.includes("state.adminLoadingScopes.has('dashboard')"),'loading feedback is not scoped to the selected admin section');
+  assert(!source.includes('if(force)state.adminLoadedScopes.delete(scope)'),'manual refresh still blanks already-loaded data while waiting');
+  assert(source.includes('const tokenAtStart=state.adminToken')&&source.includes('state.adminToken!==tokenAtStart'),'a late response can overwrite a newer login/logout state');
+  assert(source.includes('state.adminLoadedAtByScope[scope]'),'scope freshness still depends on the timestamp of an unrelated section');
+  assert(app.includes('function applyAdminSettings(')&&app.includes('function applyAdminSecurity(')&&app.includes('adminFieldAppliedSequence'),'late overlapping settings/security fields can overwrite a newer scope response');
+  assert(app.includes("if(scope!=='dashboard')scalarKeys.push('sessionDays')")&&app.includes("if(scope==='settings'||scope==='security'||scope==='ALL')scalarKeys.push('apiKeyConfigured')"),'a partial Dashboard response can overwrite authoritative Security settings');
+  assert(source.includes("current&&current.promise===request){adminLoadPromises.delete(scope);state.adminLoadingScopes.delete(scope)"),'an obsolete request can clear the loading state of a newer request');
+});
+
+test('public auto refresh is foreground-only and shared across tabs',()=>{
+  assert(app.includes("const PUBLIC_REFRESH_GATE_KEY = 'dmo_public_refresh_gate_v1'")&&app.includes('localStorage.setItem(PUBLIC_REFRESH_GATE_KEY'),'cross-tab public refresh gate is missing');
+  const source=app.slice(app.indexOf('function publicRefreshIntervalMs()'),app.indexOf('function customerNav()'));
+  assert(source.includes("document.visibilityState==='hidden'")&&source.includes("state.page==='admin'")&&source.includes('publicLoadPromise'),'hidden/admin/in-flight tabs can still poll public data');
+  assert(source.indexOf('markPublicRefreshGate();')<source.indexOf('await loadData(false)'),'a tab does not claim the refresh window before starting its request');
+  assert(source.includes("sharedPublicRefreshAt()>Number(state.publicLoadedAt||0)&&restorePublicCache(false))render()"),'fresh data received through another tab is not rendered immediately');
+  assert(source.includes("navigator.locks.request(PUBLIC_REFRESH_GATE_KEY,{mode:'exclusive',ifAvailable:true}"),'simultaneous foreground tabs can still pass the timestamp gate together');
+  assert(app.includes("document.addEventListener('visibilitychange'")&&app.includes('setInterval(autoRefreshPublic,15000)'),'foreground resume or gated interval refresh is missing');
+  assert(source.includes('state.settings?.autoRefreshSeconds'),'the Admin refresh interval setting is ignored by the foreground gate');
+  assert(app.includes("refresh.onclick = () => loadData(true)"),'manual refresh no longer bypasses the automatic gate');
+});
+
+test('session verification uses a revalidated location cache and one-range cold fallback',()=>{
+  const source=gas.slice(gas.indexOf('function sessionLocationCacheKey'),gas.indexOf('function validToken'));
+  assert(source.includes("'session-location-'+sha256")&&source.includes("String(v[h.indexOf('token')])===String(token)"),'cached session rows are not hashed or token-revalidated');
+  assert(source.includes('const all=s.getDataRange().getValues()')&&!source.includes('createTextFinder'),'cold session lookup still performs multiple finder/header/row calls');
+  assert(gas.includes('clearSessionLocation(token);return output({ok:true})')&&gas.includes('clearSessionLocation(v[i][token])'),'logout or password revocation leaves stale location entries');
 });
 
 test('PWA navigation prefers the current online shell',()=>{
@@ -79,7 +122,7 @@ test('PWA navigation prefers the current online shell',()=>{
   assert(manifest.includes('"name": "SHOP DMO"')&&!manifest.includes('"name": "GUN SHOP DMO"'),'installed PWA still uses the legacy name');
   assert(serviceWorker.includes("request.mode==='navigate'")&&serviceWorker.includes('Promise.race([network,timeout])'),'online navigation does not use a bounded network-first strategy');
   assert(serviceWorker.includes('NAVIGATION_NETWORK_TIMEOUT_MS=4000')&&serviceWorker.includes("cache.put('./index.html',response.clone())"),'stalled-navigation fallback or late cache refresh is missing');
-  assert(index.includes('20260910-v20.2-admin-shell-performance-5')&&serviceWorker.includes('gun-shop-dmo-v20-2-admin-shell-performance-5'),'PWA cache version is not advanced');
+  assert(index.includes('20260911-v20.2-admin-performance-6')&&serviceWorker.includes('gun-shop-dmo-v20-2-admin-performance-6'),'PWA cache version is not advanced');
 });
 
 test('storefront subcategory navigation is prominent and accessible',()=>{

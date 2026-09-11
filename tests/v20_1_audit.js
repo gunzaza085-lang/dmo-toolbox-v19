@@ -142,7 +142,7 @@ check('24. OWNER password management security', () => {
 check('25. Shop identity settings and blank values', () => {
   assert(app.includes("if (hasOwn(settings, key)) return String(settings[key] ?? '').trim();"), 'Settings ยังไม่มาก่อน config หรือไม่รองรับค่าว่าง');
   assert(!app.includes("cfg.shopName || state.settings.shopName"), 'config ยังทับชื่อร้านจาก Settings');
-  assert(!app.includes("settings.ownerName || 'Natthananat Kawinwatthanakorn'"), 'ชื่อเจ้าของว่างยังถูกแทนด้วยค่าเดิม');
+  assert(app.includes("shopName: configuredSettingText(settings, 'shopName', 'SHOP DMO')")&&app.includes("ownerName: configuredSettingText(settings, 'ownerName', '')"), 'ค่า fallback ยังแสดงชื่อร้านหรือชื่อเจ้าของเดิม');
   assert(app.includes('เว้นว่างเพื่อไม่แสดงชื่อร้าน') && app.includes('เว้นว่างเพื่อไม่แสดงชื่อเจ้าของ'), 'ฟอร์มไม่ได้แจ้งว่าซ่อนชื่อได้');
   assert(app.includes("shopName: document.getElementById('setShopName').value.trim()"), 'ชื่อร้านไม่ได้บันทึกค่าที่ตัดช่องว่างแล้ว');
   assert(app.includes("ownerName: document.getElementById('setOwnerName').value.trim()"), 'ชื่อเจ้าของไม่ได้บันทึกค่าที่ตัดช่องว่างแล้ว');
@@ -222,13 +222,13 @@ check('32. Admin scoped loading and large-list performance', () => {
   assert(app.includes('state.adminLoadedScopes.add(scope)'), 'ไม่มี cache ของ scope ที่โหลดแล้ว');
   assert(app.includes("state.adminView !== 'facebookBump' && !state.adminLoadedScopes.has(state.adminView)"), 'หน้า Admin ยังแสดงข้อมูล bootstrap เป็นศูนย์ก่อน scope โหลดเสร็จ');
   assert(app.includes('id="retryAdminScopeBtn"'), 'หน้า Admin ไม่มีทาง retry เมื่อโหลด scope ไม่สำเร็จ');
-  assert(app.includes('state.adminLoading = false;adminLoadPromise=null;render();'), 'สถานะโหลด Admin ไม่ render ใหม่หลัง request ล้มเหลว');
+  assert(app.includes('state.adminLoading=adminLoadPromises.size>0;render();') && app.includes('state.adminScopeErrors[scope]=error.message'), 'สถานะโหลด Admin ไม่ render ใหม่หรือไม่แสดงข้อผิดพลาดหลัง request ล้มเหลว');
   const ordersSource=app.slice(app.indexOf('function adminOrders()'),app.indexOf('function integrityPage'));
   assert(ordersSource.includes('itemsByOrder=new Map()'), 'หน้าออเดอร์ยังไม่มีดัชนี Order Items');
   assert(!ordersSource.includes('itemRows.filter('), 'หน้าออเดอร์ยัง scan Order Items ซ้ำต่อออเดอร์');
   ['adminOrderVisible','adminCatalogVisible','inventoryVisible','customerVisible'].forEach(key=>assert(app.includes(key),`ไม่มี batch limit: ${key}`));
   ['loadMoreOrdersBtn','loadMoreAdminCatalogBtn','loadMoreInventoryBtn','loadMoreCustomersBtn'].forEach(id=>assert(app.includes(id),`ไม่มีปุ่มแสดงเพิ่ม: ${id}`));
-  assert(read('index.html').includes('20260910-v20.2-admin-shell-performance-5')&&read('sw.js').includes('gun-shop-dmo-v20-2-admin-shell-performance-5'),'PWA cache version ยังไม่ตรงกับ admin shell/performance build');
+  assert(read('index.html').includes('20260911-v20.2-admin-performance-6')&&read('sw.js').includes('gun-shop-dmo-v20-2-admin-performance-6'),'PWA cache version ยังไม่ตรงกับ admin performance build');
 });
 
 [

@@ -1,6 +1,17 @@
 # GUN SHOP DMO V20.1 — Stability & Security Final
 
-Owner: Natthananat Kawinwatthanakorn
+Owner display: disabled
+
+## V20.2.3 — Admin performance and reliability
+
+- Admin sections now load independently, so a slow Dashboard request no longer blocks Orders, Customers, or Settings.
+- Late responses are merged field-by-field and cannot overwrite newer Settings or Security data.
+- Active admin sessions use a hashed, revalidated row-location cache while continuing to read the live status and expiry on every request.
+- Repeated spreadsheet/header service calls were reduced and small operational sheets use one rectangular read where possible.
+- Dashboard and safe shared Settings caches have bounded lifetimes and are invalidated by all relevant mutations, including archive/restore operations.
+- Storefront background refresh runs only in a visible storefront tab and coordinates across tabs with a Web Lock plus timestamp fallback.
+- Read-only requests have a 30-second total budget, clear errors, and retry only when enough time remains.
+- PWA shell cache advanced to `admin-performance-6` so old frontend assets are replaced safely.
 
 ## V20.1 Release Candidate — Order operations safety
 

@@ -1,6 +1,6 @@
 GUN SHOP DMO V20.1 — STABILITY & SECURITY FINAL
 ================================================
-เจ้าของร้าน: Natthananat Kawinwatthanakorn
+การแสดงชื่อเจ้าของร้าน: ปิดไว้ (ตั้งค่าได้จากหลังบ้าน)
 
 ระบบยังใช้ Architecture เดิม:
 - HTML / CSS / Vanilla JavaScript
